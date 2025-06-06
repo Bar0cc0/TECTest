@@ -1,7 +1,10 @@
 API:
-  url: ""
-  token: ""
-  account: ""
+  url: "https://twtransfer.energytransfer.com"
+  routing_path: "/ipost/"
+  format: "csv"
+  asset_id: "TW"
+  search_type: "ALL"
+  history: 3 # days
   timeout: 30 # seconds
   retry_attempts: 3
 
