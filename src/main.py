@@ -3,7 +3,6 @@
 
 # main.py
 # This script serves as the entry point for the application.
-# It orchestrates the data ingestion pipeline by downloading and processing the data.
 # It also includes a test mode for running unit tests.
 
 __author__ = 'Michael Garancher'
@@ -17,7 +16,10 @@ from importlib.util import spec_from_file_location, module_from_spec
 import concurrent.futures
 from pathlib import Path
 import asyncio
+from typing import Optional, Union, Dict, Any, List
+import logging
 
+from interfaces import IConfigProvider
 from configuration import Configuration
 from connectors import WebConnector
 from scheduler import DataScheduler, CycleMonitor
@@ -32,7 +34,18 @@ from utils import (
 )
 
 
-async def run_data_pipeline(config, endpoint, params=None):
+async def run_data_pipeline(config: IConfigProvider, endpoint: str, 
+							params: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None) -> bool:
+	"""Run the data ingestion pipeline asynchronously.
+	
+	Args:
+		config: Configuration object containing settings
+		endpoint: Endpoint to call
+		params: Optional parameters to pass to the HTTP request
+	
+	Returns:
+		bool: True if the pipeline ran successfully, False otherwise (e.g., if interrupted)
+	"""
 	# Initialize components
 	connector = WebConnector(config)
 	scheduler = DataScheduler(config, connector)
@@ -46,7 +59,14 @@ async def run_data_pipeline(config, endpoint, params=None):
 			return False
 		
 		# Schedule regular retrieval
-		scheduler.schedule_endpoint(endpoint, interval_hours=24.0, params=params)
+		if params:
+			if isinstance(params, list):
+				# Handle list of parameter dictionaries
+				for param_dict in params:
+					scheduler.schedule_endpoint(endpoint, params=param_dict)
+			else:
+				# Handle single parameter dictionary
+				scheduler.schedule_endpoint(endpoint, params=params)
 
 		# Start the cycle monitor
 		if not monitor.start():
@@ -54,7 +74,7 @@ async def run_data_pipeline(config, endpoint, params=None):
 			scheduler.stop()
 			return False
 		
-		# Keep the pipeline running until interrupted
+		# Track the running state of the pipeline entering the main loop
 		running = True
 		while running:
 			try:
@@ -70,9 +90,17 @@ async def run_data_pipeline(config, endpoint, params=None):
 		scheduler.stop()
 		monitor.stop()
 
-async def shutdown(signal, loop, task, logger):
-	"""Handle shutdown gracefully."""
-	logger.info(f"Shutting down due to signal: {signal.name}")
+async def shutdown(signal: signal.Signals, loop: asyncio.AbstractEventLoop, 
+				   task: asyncio.Task, logger: logging.Logger) -> None:
+	"""Handle shutdown gracefully.
+	
+	Args:
+		signal: The signal that triggered the shutdown
+		loop: The asyncio event loop
+		task: The running pipeline task
+		logger: Logger instance for logging shutdown messages
+	"""
+	logger.debug(f"Shutting down due to signal: {signal.name}")
 	
 	# Cancel the pipeline task
 	task.cancel()
@@ -87,7 +115,7 @@ def run_tests() -> int:
 	"""Run unit tests using the main_unittest.py orchestrator."""
 	return 0
 
-def main(endpoint: str, loglevel: str, **params ) -> int:
+def main(endpoint: str, loglevel: str, **params: Any) -> int:
 	"""
 	Main function that orchestrates the data ingestion pipeline.
 	
@@ -100,7 +128,7 @@ def main(endpoint: str, loglevel: str, **params ) -> int:
 		int: Return code (0 for success, 1 for failure)
 	"""
 
-	# Display application header
+	# Display application header information in terminal
 	display_header(__version__, endpoint)
 
 	# Initialize the configuration
@@ -109,18 +137,18 @@ def main(endpoint: str, loglevel: str, **params ) -> int:
 	# Get the logger
 	logger = config.get_logger()
 
-	# Parse any list parameters to get all parameter combinations
+	# Parse any parameters passed as a list to get all parameter combinations
 	parsed_params = {}
 	for key, value in params.items():
 		parsed_params[key] = parse_list_param(value)
 
 	param_combinations = process_multi_value_params(parsed_params)
 
-	# Run the async pipeline
+	# Create the asyncio event loop
 	loop = asyncio.new_event_loop()
 	asyncio.set_event_loop(loop)
 	
-	# Create the pipeline task
+	# Create a pipeline task
 	pipeline_task = asyncio.ensure_future(
 		run_data_pipeline(config, endpoint, param_combinations),
 		loop=loop
@@ -132,7 +160,7 @@ def main(endpoint: str, loglevel: str, **params ) -> int:
 		for sig in (signal.SIGINT, signal.SIGTERM):
 			loop.add_signal_handler(
 				sig,
-				lambda s=sig: asyncio.create_task(shutdown(s, loop, pipeline_task, logger))
+				lambda: asyncio.create_task(shutdown(sig, loop, pipeline_task, logger))
 			)
 		
 		# Run until the task completes or is cancelled
@@ -147,7 +175,6 @@ def main(endpoint: str, loglevel: str, **params ) -> int:
 			loop.run_until_complete(pipeline_task)
 		except asyncio.CancelledError:
 			pass
-		
 		success = False
 	finally:
 		loop.close()
@@ -177,6 +204,7 @@ if __name__ == "__main__":
 	# Check if we're running in test mode
 	if args.test:
 		sys.exit(run_tests())
+
 	# Else run normal operation
 	else:
 		# Check if an endpoint is provided
