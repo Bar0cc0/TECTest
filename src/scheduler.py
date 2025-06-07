@@ -15,29 +15,31 @@ import signal
 import json
 
 from interfaces import IConfigProvider
-from connectors import WebConnector, CycleIdentifier
+from connectors import WebConnector, DatabaseConnector
 from reporter import DataQualityCheckerFactory
 from processors import DataProcessorFactory
 
 
 class DataScheduler:
 	"""Scheduler for orchestrating data retrieval operations."""
-	
-	def __init__(self, config: IConfigProvider, connector: WebConnector) -> None:
+
+	def __init__(self, config: IConfigProvider, webconnector: WebConnector, databaseconnector: DatabaseConnector) -> None:
 		"""
 		Initialize the scheduler with configuration and connector.
 		
 		Args:
 			config: Configuration provider
-			connector: Web connector for data retrieval
+			webconnector: Web connector for data retrieval
+			databaseconnector: Database connector for data loading
 		"""
 		self._config = config
 		self._logger = config.get_logger()
-		self._connector = connector
-		
+		self._webconnector = webconnector
+		self._db_connector = databaseconnector
+
 		# Register for cycle updates
-		self._connector.register_cycle_callback(self._handle_cycle_update)
-		
+		self._webconnector.register_cycle_callback(self._handle_cycle_update)
+
 		# Track scheduled tasks
 		self._scheduled_tasks: Dict[str, asyncio.Future] = {}
 		self._scheduled_endpoints: Set[str] = set()
@@ -75,8 +77,8 @@ class DataScheduler:
 				continue
 				
 			# Check persistent cache first - skip if already in cache
-			if self._connector.is_in_cache(endpoint, cycle, date):
-				cached_path = self._connector.get_cached_file_path(endpoint, cycle, date)
+			if self._webconnector.is_in_cache(endpoint, cycle, date):
+				cached_path = self._webconnector.get_cached_file_path(endpoint, cycle, date)
 				self._logger.info(f"Data for {task_key} already in cache: {cached_path}, skipping download")
 				continue
 				
@@ -118,7 +120,7 @@ class DataScheduler:
 		try:
 			date_str = date.strftime("%Y%m%d") if date else "today"
 			self._logger.info(f"Fetching data for endpoint {endpoint} date {date_str}" + 
-							(f" cycle {cycle}" if cycle is not None else ""))
+						(f" cycle {cycle}" if cycle is not None else ""))
 			
 			# Get API parameters for this request
 			api_params = {}
@@ -133,9 +135,9 @@ class DataScheduler:
 			
 			# Track if files came from cache for quality check decision
 			from_cache = False
-	
+
 			# Pass the date and params to the connector
-			success, files = await self._connector.fetch_data_with_retry(
+			success, files = await self._webconnector.fetch_data_with_retry(
 				endpoint, 
 				cycle, 
 				date=date, 
@@ -143,8 +145,8 @@ class DataScheduler:
 			)
 			
 			# Check if these are cached files by looking at the connector's response
-			if hasattr(self._connector, 'last_response_from_cache'):
-				from_cache = self._connector.last_response_from_cache
+			if hasattr(self._webconnector, 'last_response_from_cache'):
+				from_cache = self._webconnector.last_response_from_cache
 
 			if success:
 				if len(files) > 0:
@@ -167,7 +169,7 @@ class DataScheduler:
 								lineage_processor.process(file_path)
 							except Exception as e:
 								self._logger.warning(f"Failed to add lineage to {file_path}: {e}")
-
+						
 						# Step 3: Run CapacityDataProcessor for each file
 						capacity_processor = DataProcessorFactory.create_processor('capacity', self._config)
 						for file_path in files:
@@ -175,8 +177,17 @@ class DataScheduler:
 								capacity_processor.process(file_path)
 							except Exception as e:
 								self._logger.warning(f"Failed to process capacity data in {file_path}: {e}")
-
-						# Step 4: Run data quality check after all processing is complete
+						
+						# Step 4: Queue files for database loading if enabled
+						if self._db_connector and self._config.get_config('enable_database_loading', True):
+							table_name = self._get_table_name_for_endpoint(endpoint)
+							success = self._db_connector.post_data(table_name, files, cycle, date)
+							if success:
+								self._logger.info(f"Queued {len(files)} files for loading to database table '{table_name}'")
+							else:
+								self._logger.error(f"Failed to queue files for database loading to table '{table_name}'")
+						
+						# Step 5: Run data quality check after all processing is complete
 						if self._config.get_config('data_quality_report'):
 							await self._process_data_quality(endpoint, files, cycle, date)
 							
@@ -184,7 +195,7 @@ class DataScheduler:
 						self._logger.debug(f"Skipping processing for cached files {[file.name for file in files]} from {endpoint}")
 				else:
 					self._logger.debug(f"No files retrieved for {endpoint} date {date_str}" +
-								(f" cycle {cycle}" if cycle is not None else ""))
+							(f" cycle {cycle}" if cycle is not None else ""))
 				
 			else:
 				self._logger.debug(f"No data found for {endpoint} date {date_str}" +
@@ -203,6 +214,42 @@ class DataScheduler:
 		except Exception as e:
 			self._logger.error(f"Error fetching data for {endpoint}: {str(e)}")
 			return False, []
+
+	def _get_table_name_for_endpoint(self, endpoint: str) -> str:
+		"""
+		Convert API endpoint to a database table name.
+		
+		Args:
+			endpoint: API endpoint name
+			
+		Returns:
+			Database table name
+		"""
+		# Remove slashes and normalize endpoint name
+		normalized_endpoint = endpoint.replace('/', '_').replace('-', '_')
+		
+		# First try to get from the mapping, removing any slashes
+		endpoint_key = endpoint.replace('/', '_')
+		
+		# Check if there's a mapping in config
+		mappings = self._config.get_config('endpoint_table_mappings', {})
+		
+		# Try exact match first
+		if endpoint in mappings:
+			return mappings[endpoint]
+			
+		# Try with underscores instead of hyphens
+		if endpoint_key in mappings:
+			return mappings[endpoint_key]
+			
+		# Try with hyphens instead of underscores
+		hyphenated = endpoint.replace('_', '-')
+		if hyphenated in mappings:
+			return mappings[hyphenated]
+		
+		# Default to normalized endpoint if no mapping found
+		self._logger.warning(f"No table mapping found for endpoint '{endpoint}', using normalized name")
+		return normalized_endpoint
 
 	async def _process_data_quality(self, endpoint: str, files: List[Path], cycle: Optional[int] = None,
 								date: Optional[datetime] = None) -> None:
@@ -340,7 +387,26 @@ class DataScheduler:
 		self._scheduled_endpoints.remove(endpoint)
 		
 		return True
-	
+
+	async def load_to_database(self, table_name: str, data_files: List[Path], 
+							cycle: Optional[int] = None, date: Optional[datetime] = None) -> bool:
+		"""
+		Load processed data files into the database.
+		
+		Args:
+			table_name: Database table name
+			data_files: List of processed CSV files to load
+			cycle: Optional cycle number
+			date: Optional specific date
+			
+		Returns:
+			Success flag
+		"""
+		self._logger.info(f"Loading {len(data_files)} files to database table '{table_name}'")
+		
+		# Queue the files for processing
+		return self._db_connector.post_data(table_name, data_files, cycle, date)
+
 	def _run_event_loop(self) -> None:
 		"""Run the event loop in a separate thread."""
 		loop = None
@@ -420,6 +486,23 @@ class DataScheduler:
 						except Exception as e:
 							self._logger.error(f"Error cancelling task for {endpoint} cycle {cycle}: {e}")
 		
+		# Close database connector if it exists
+		if self._db_connector:
+			try:
+				# Wait for remaining queue items to be processed
+				if hasattr(self._db_connector, '_queue') and hasattr(self._db_connector._queue, 'join'):
+					try:
+						self._db_connector._queue.join()
+					except Exception as e:
+						self._logger.warning(f"Error waiting for database queue to complete: {e}")
+						
+				# Close the connector
+				if hasattr(self._db_connector, 'close'):
+					self._db_connector.close()
+					self._logger.info("Database connector closed")
+			except Exception as e:
+				self._logger.error(f"Error closing database connector: {e}")
+
 		# Stop the event loop
 		if self._event_loop is not None:
 			try:
