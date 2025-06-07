@@ -1,13 +1,27 @@
+# API Configuration
 API:
   url: "https://twtransfer.energytransfer.com"
   routing_path: "/ipost/"
   format: "csv"
   asset_id: "TW"
   search_type: "ALL"
-  history: 3 # days
+  history: 3  # days
   timeout: 30 # seconds
   retry_attempts: 3
 
+# Database Configuration
+Database:
+  db_type: postgresql
+  db_host: localhost
+  db_port: 5432
+  db_name: tec_data
+  db_user: postgres
+  db_password: postgres
+
+endpoint_table_mappings:
+  capacity_operationally-available: operational_capacity
+
+# Data Processing Configuration
 Directories:
   output_dir: data
   log_dir: logs
@@ -19,6 +33,7 @@ Optimization:
   cache_ttl: 86400  # Cache time-to-live in seconds (defaults to 1 day)
   workers: 4        # Number of parallel workers for data processing
   batch_size: 1000  # Number of records to process in each batch
+  trigger_delay: 1  # hours
 
 Reporting:
   data_quality_report: True
