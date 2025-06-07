@@ -12,6 +12,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Callable, Union, Tuple
 import urllib.parse
+import threading
+import queue
+import pandas as pd
 
 from interfaces import IConfigProvider,	IConnector
 
@@ -628,22 +631,24 @@ class WebConnector(IConnector):
 		except Exception as e:
 			self._logger.warning(f"Error saving metadata: {e}")
 
-	async def fetch_data_with_retry(self, endpoint: str, cycle: Optional[int] = None, **params) -> Tuple[bool, List[Path]]:
+	async def fetch_data_with_retry(self, endpoint: str, cycle: Optional[int] = None, 
+								 date: Optional[datetime] = None, **params) -> Tuple[bool, List[Path]]:
 		"""
 		Fetch data with retry logic.
 		
 		Args:
 			endpoint: API endpoint
 			cycle: Optional cycle number
+			date: Optional date
 			**params: Additional parameters
-			
+
 		Returns:
 			Tuple of (success_flag, list_of_downloaded_files)
 		"""
 		attempt = 0
 		while attempt < self._retry_attempts:
 			try:
-				success, files = await self.fetch_data(endpoint, cycle, **params)
+				success, files = await self.fetch_data(endpoint, cycle, date=date, **params)
 				if success:
 					return True, files
 				
@@ -662,7 +667,41 @@ class WebConnector(IConnector):
 		self._logger.error(f"Failed to fetch data for {endpoint} cycle {cycle} after {self._retry_attempts} attempts")
 		return False, []
 
+	def post_data(self, endpoint: str, data_files: List[Path], 
+				cycle: Optional[int] = None, date: Optional[datetime] = None, 
+				**params) -> bool:
+		"""
+		Not supported for WebConnector.
+		
+		Args:
+			endpoint: The data endpoint/table/path
+			data_files: List of files to post
+			cycle: Optional cycle identifier
+			date: Optional date
+			**params: Additional parameters
+			
+		Returns:
+			Always raises NotImplementedError
+		"""
+		raise NotImplementedError("WebConnector does not support post operations")
 
+	def post_data_with_retry(self, endpoint: str, data_files: List[Path],
+						cycle: Optional[int] = None, date: Optional[datetime] = None,
+						**params) -> bool:
+		"""
+		Not supported for WebConnector.
+		
+		Args:
+			endpoint: The data endpoint/table/path
+			data_files: List of files to post
+			cycle: Optional cycle identifier
+			date: Optional date
+			**params: Additional parameters
+			
+		Returns:
+			Always raises NotImplementedError
+		"""
+		raise NotImplementedError("WebConnector does not support post operations with retry")
 
 class CycleIdentifier:
 	"""Extract cycle information from original HTTP response filenames."""
@@ -721,3 +760,510 @@ class CycleIdentifier:
 			CycleIdentifier.INTRADAY_2, 
 			CycleIdentifier.INTRADAY_3
 		]
+
+
+class DatabaseConnector(IConnector):
+	"""
+	Connector for database connecting to the database and processing files through a queue.
+	"""
+	_instance = None
+	_lock = threading.Lock()
+	
+	def __new__(cls, config: IConfigProvider):
+		"""Implement singleton pattern with double-checked locking."""
+		if cls._instance is None:
+			with cls._lock:
+				if cls._instance is None:
+					cls._instance = super(DatabaseConnector, cls).__new__(cls)
+					cls._instance._initialized = False
+		return cls._instance
+	
+	def __init__(self, config: IConfigProvider):
+		"""Initialize the DatabaseConnector with configuration."""
+		# Only initialize once
+		if hasattr(self, '_initialized') and self._initialized:
+			return
+			
+		self._config = config
+		self._logger = config.get_logger()
+		
+		# Get database configuration
+		db_config = config.get_config('Database', {})
+		self._db_type = db_config.get('db_type', 'postgresql')
+		self._db_host = db_config.get('db_host', 'localhost')
+		self._db_port = db_config.get('db_port', 5432)
+		self._db_name = db_config.get('db_name', 'tec_data')
+		self._db_user = db_config.get('db_user', 'postgres')
+		self._db_password = db_config.get('db_password', 'postgres')
+		self._retry_attempts = config.get_config('API', {}).get('retry_attempts', 3)
+		
+		# Initialize connection
+		self._connection = None
+		self._connect()
+		
+		# Setup processing queue
+		self._queue = queue.Queue()
+		self._processing = False
+		self._worker_thread = None
+		self._running = False
+		
+		# Callback for cycle updates
+		self._cycle_callback = None
+		
+		# Start the worker thread
+		self._start_worker()
+		
+		self._initialized = True
+		self._logger.info("DatabaseConnector initialized")
+	
+	def _connect(self):
+		"""Establish connection to the database."""
+		try:
+			if self._db_type == 'postgresql':
+				import psycopg2
+				self._logger.info(f"Connecting to PostgreSQL database {self._db_name} at {self._db_host}:{self._db_port}")
+				self._connection = psycopg2.connect(
+					host=self._db_host,
+					port=self._db_port,
+					dbname=self._db_name,
+					user=self._db_user,
+					password=self._db_password
+				)
+				# Don't enable autocommit - we want explicit transaction control
+				self._connection.autocommit = False
+				self._logger.info("Successfully connected to database")
+			else:
+				self._logger.error(f"Unsupported database type: {self._db_type}")
+		except Exception as e:
+			self._logger.error(f"Error connecting to database: {str(e)}")
+			self._connection = None
+	
+	def _start_worker(self):
+		"""Start the worker thread that processes the queue."""
+		if self._worker_thread is not None and self._worker_thread.is_alive():
+			return  # Worker is already running
+			
+		self._running = True
+		self._worker_thread = threading.Thread(target=self._process_queue, daemon=True)
+		self._worker_thread.start()
+		self._logger.debug("Database worker thread started")
+
+	def _stop_worker(self):
+		"""Stop the worker thread."""
+		self._running = False
+		if self._worker_thread and self._worker_thread.is_alive():
+			self._worker_thread.join(timeout=5.0)
+			self._logger.debug("Database worker thread stopped")
+
+	def _process_queue(self):
+		"""Worker thread function to process items in the queue."""
+		while self._running:
+			try:
+				# Get an item from the queue with timeout to allow checking _running flag
+				try:
+					item = self._queue.get(timeout=1.0)
+				except queue.Empty:
+					continue
+					
+				# Process the item
+				self._processing = True
+				try:
+					self._logger.debug(f"Processing queue item: {item['endpoint']}, {len(item['files'])} files")
+					success = self._post_data_internal(
+						item['endpoint'],
+						item['files'],
+						item['cycle'],
+						item['date'],
+						**item.get('params', {})
+					)
+					if success:
+						self._logger.info(f"Successfully processed {len(item['files'])} files for {item['endpoint']}")
+					else:
+						self._logger.error(f"Failed to process files for {item['endpoint']}")
+				except Exception as e:
+					self._logger.error(f"Error processing queue item: {str(e)}")
+				finally:
+					self._processing = False
+					self._queue.task_done()
+			except Exception as e:
+				self._logger.error(f"Error in database worker thread: {str(e)}")
+
+	def register_cycle_callback(self, callback: Callable[[int, Optional[datetime]], None]) -> None:
+		"""Register a callback for cycle updates."""
+		self._cycle_callback = callback
+
+	def notify_cycle_update(self, cycle: int, date: Optional[datetime] = None) -> None:
+		"""Notify that a new cycle is available."""
+		if self._cycle_callback:
+			self._cycle_callback(cycle, date)
+
+	async def fetch_data(self, endpoint: str, cycle: Optional[int] = None, 
+					date: Optional[datetime] = None, **params) -> Tuple[bool, List[Path]]:
+		"""
+		Not supported for DatabaseConnector.
+		"""
+		self._logger.warning("fetch_data not implemented for DatabaseConnector")
+		return False, []
+
+	async def fetch_data_with_retry(self, endpoint: str, cycle: Optional[int] = None, 
+							date: Optional[datetime] = None, **params) -> Tuple[bool, List[Path]]:
+		"""
+		Not supported for DatabaseConnector.
+		"""
+		self._logger.warning("fetch_data_with_retry not implemented for DatabaseConnector")
+		return False, []
+	
+	def post_data(self, endpoint: str, data_files: List[Path], 
+				cycle: Optional[int] = None, date: Optional[datetime] = None, 
+				**params) -> bool:
+		"""
+		Queue data files for posting to the database.
+		
+		Args:
+			endpoint: The table name to post to
+			data_files: List of CSV files to post
+			cycle: Optional cycle identifier
+			date: Optional date
+			**params: Additional parameters
+			
+		Returns:
+			True if files were queued successfully
+		"""
+		if not data_files:
+			self._logger.warning("No files provided to post_data")
+			return False
+		
+		# Check if there are any valid files to queue
+		valid_files = []
+		for file_path in data_files:
+			if not file_path.exists():
+				self._logger.warning(f"File does not exist: {file_path}")
+				continue
+				
+			if file_path.stat().st_size < 200:
+				self._logger.warning(f"File too small, likely empty: {file_path}")
+				continue
+				
+			valid_files.append(file_path)
+		
+		if not valid_files:
+			self._logger.warning("No valid files to queue")
+			return False
+			
+		# Add to the processing queue
+		self._logger.info(f"Queuing {len(valid_files)} files for {endpoint}")
+		self._queue.put({
+			'endpoint': endpoint,
+			'files': valid_files,
+			'cycle': cycle,
+			'date': date,
+			'params': params
+		})
+		
+		# Ensure worker is running
+		if not self._worker_thread or not self._worker_thread.is_alive():
+			self._start_worker()
+			
+		return True
+
+	def post_data_with_retry(self, endpoint: str, data_files: List[Path],
+						cycle: Optional[int] = None, date: Optional[datetime] = None,
+						**params) -> bool:
+		"""
+		Post data with retry logic.
+		
+		Args:
+			endpoint: The database table
+			data_files: List of files to post
+			cycle: Optional cycle identifier
+			date: Optional date
+			**params: Additional parameters
+			
+		Returns:
+			Success flag
+		"""
+		attempt = 0
+		while attempt < self._retry_attempts:
+			try:
+				# Call the internal post method
+				success = self._post_data_internal(endpoint, data_files, cycle, date, **params)
+				if success:
+					return True
+					
+				# If not successful, retry
+				attempt += 1
+				if attempt < self._retry_attempts:
+					wait_time = 2 ** attempt  # Exponential backoff
+					self._logger.debug(f"Retry {attempt} for posting to {endpoint} in {wait_time} seconds")
+					time.sleep(wait_time)
+			except Exception as e:
+				self._logger.error(f"Error during post attempt {attempt} to {endpoint}: {str(e)}")
+				attempt += 1
+				if attempt < self._retry_attempts:
+					time.sleep(2 ** attempt)
+		
+		# If we get here, all attempts failed
+		self._logger.error(f"Failed to post data to {endpoint} after {self._retry_attempts} attempts")
+		return False
+
+	def _post_data_internal(self, endpoint: str, data_files: List[Path],
+						cycle: Optional[int] = None, date: Optional[datetime] = None,
+						**params) -> bool:
+		"""
+		Internal method to post data to the database.
+		
+		Args:
+			endpoint: The table name
+			data_files: List of CSV files to load
+			cycle: Optional cycle identifier
+			date: Optional date
+			**params: Additional parameters
+			
+		Returns:
+			Success flag
+		"""
+		if not self._connection:
+			self._logger.error("No database connection available")
+			self._connect()  # Try to reconnect
+			if not self._connection:
+				return False
+		
+		attempt = 0
+		while attempt < self._retry_attempts:
+			try:
+				# Create a cursor
+				cursor = self._connection.cursor()
+				
+				# Process each file
+				total_rows = 0
+				for file_path in data_files:
+					self._logger.debug(f"Processing file: {file_path}")
+					
+					# Read CSV file
+					try:
+						df = pd.read_csv(file_path)
+					except Exception as e:
+						self._logger.error(f"Error reading file {file_path}: {str(e)}")
+						continue
+						
+					if df.empty:
+						self._logger.warning(f"File {file_path} is empty, skipping")
+						continue
+					
+					# Ensure the table exists
+					try:
+						self._ensure_table_exists(cursor, endpoint, df)
+					except Exception as e:
+						self._logger.error(f"Error ensuring table exists: {str(e)}")
+						self._connection.rollback()
+						raise e
+					
+					# Insert the data
+					try:
+						rows = self._insert_dataframe(cursor, endpoint, df)
+						total_rows += rows
+					except Exception as e:
+						self._logger.error(f"Error inserting data: {str(e)}")
+						self._connection.rollback()
+						raise e
+				
+				# Commit the transaction
+				self._connection.commit()
+				self._logger.info(f"Successfully inserted {total_rows} rows into {endpoint}")
+				return True
+				
+			except Exception as e:
+				attempt += 1
+				self._logger.error(f"Error in _post_data_internal (attempt {attempt}/{self._retry_attempts}): {str(e)}")
+				
+				# Try to reconnect if connection issue
+				if "connection" in str(e).lower() or "broken" in str(e).lower():
+					self._connect()
+				
+				if attempt < self._retry_attempts:
+					wait_time = 2 ** attempt  # Exponential backoff
+					self._logger.debug(f"Retrying in {wait_time} seconds...")
+					time.sleep(wait_time)
+				else:
+					return False	
+		return True # Return success after all operations complete
+
+	def _ensure_table_exists(self, cursor, table_name: str, df: pd.DataFrame) -> bool:
+		"""
+		Ensure the specified table exists with the correct schema.
+		If it doesn't exist, create it based on the DataFrame schema.
+		
+		Args:
+			cursor: Database cursor
+			table_name: Name of the table
+			df: DataFrame containing the data to be inserted
+		"""
+		# Check if connection is valid
+		if not self._connection:
+			self._logger.error("Cannot ensure table exists: No database connection")
+			return False
+			
+		try:
+			# Check if table exists
+			cursor.execute("""
+				SELECT EXISTS (
+					SELECT FROM information_schema.tables 
+					WHERE table_schema = 'public' 
+					AND table_name = %s
+				);
+			""", (table_name,))
+			
+			table_exists = cursor.fetchone()[0]
+			
+			if not table_exists:
+				# Get schema file path - look at project root (one level up from src)
+				schema_file_path = Path(__file__).parent.parent / 'schema.sql'
+				
+				self._logger.info(f"Table {table_name} does not exist. Executing schema file: {schema_file_path}")
+				
+				if schema_file_path.exists():
+					try:
+						# Read the entire schema file
+						with open(schema_file_path, 'r') as f:
+							schema_sql = f.read()
+						
+						# Execute the entire schema file to create all tables and indexes
+						cursor.execute(schema_sql)
+						
+						# Add null check before commit
+						if self._connection:
+							self._connection.commit()
+						else:
+							self._logger.error("Cannot commit schema changes: Connection lost")
+							return False
+							
+						# Verify the table was created
+						cursor.execute("""
+							SELECT EXISTS (
+								SELECT FROM information_schema.tables 
+								WHERE table_schema = 'public' 
+								AND table_name = %s
+							);
+						""", (table_name,))
+						
+						if not cursor.fetchone()[0]:
+							self._logger.error(f"Schema file did not create the required table: {table_name}")
+							return False
+							
+					except Exception as e:
+						self._logger.error(f"Error executing schema file: {str(e)}")
+						if self._connection:
+							self._connection.rollback()
+						return False
+				else:
+					self._logger.error(f"Schema file not found: {schema_file_path}")
+					return False
+					
+			return True
+		except Exception as e:
+			self._logger.error(f"Error checking table existence: {str(e)}")
+			if self._connection:
+				self._connection.rollback()
+			return False
+
+	def _insert_dataframe(self, cursor, table_name: str, df: pd.DataFrame) -> int:
+		"""
+		Insert DataFrame into database table.
+		
+		Args:
+			cursor: Database cursor
+			table_name: Name of the table
+			df: DataFrame containing the data to be inserted
+			
+		Returns:
+			Number of rows inserted
+		"""
+		try:
+			# Create a copy to avoid modifying the original
+			df_copy = df.copy()
+			
+			# Log column types for debugging
+			self._logger.debug(f"DataFrame column dtypes before conversion: {df_copy.dtypes}")
+			
+			# Convert all NumPy integer types to Python int
+			for col in df_copy.select_dtypes(include=['int8', 'int16', 'int32', 'int64', 'uint8', 'uint16', 'uint32', 'uint64']).columns:
+				self._logger.debug(f"Converting column {col} from {df_copy[col].dtype} to Python int")
+				df_copy[col] = df_copy[col].astype(object).where(pd.notnull(df_copy[col]), None)
+				# Apply conversion only to non-null values
+				mask = df_copy[col].notnull()
+				df_copy.loc[mask, col] = df_copy.loc[mask, col].apply(lambda x: int(x) if pd.notnull(x) else None)
+			
+			# Convert all NumPy float types to Python float
+			for col in df_copy.select_dtypes(include=['float16', 'float32', 'float64']).columns:
+				self._logger.debug(f"Converting column {col} from {df_copy[col].dtype} to Python float")
+				df_copy[col] = df_copy[col].astype(object).where(pd.notnull(df_copy[col]), None)
+				# Apply conversion only to non-null values
+				mask = df_copy[col].notnull()
+				df_copy.loc[mask, col] = df_copy.loc[mask, col].apply(lambda x: float(x) if pd.notnull(x) else None)
+			
+			# Convert boolean types to Python bool
+			for col in df_copy.select_dtypes(include=['bool']).columns:
+				self._logger.debug(f"Converting column {col} from bool to Python bool")
+				df_copy[col] = df_copy[col].astype(object).where(pd.notnull(df_copy[col]), None)
+				# Apply conversion only to non-null values
+				mask = df_copy[col].notnull()
+				df_copy.loc[mask, col] = df_copy.loc[mask, col].apply(lambda x: bool(x) if pd.notnull(x) else None)
+			
+			# Handle datetime types
+			for col in df_copy.select_dtypes(include=['datetime64']).columns:
+				self._logger.debug(f"Converting column {col} from datetime64 to Python datetime")
+				df_copy[col] = df_copy[col].astype(object).where(pd.notnull(df_copy[col]), None)
+			
+			# Replace any remaining NaN values with None for SQL compatibility
+			df_copy = df_copy.replace({pd.NA: None, pd.NaT: None})
+			df_copy = df_copy.where(pd.notnull(df_copy), None)
+			
+			# Get column names with proper quoting for SQL, SKIP THE ID COLUMN
+			columns = [col for col in df_copy.columns if col.lower() != 'id']
+			column_str = ", ".join(f'"{col}"' for col in columns)
+			
+			# Create parameterized query - excludes the id column which is SERIAL
+			placeholders = ", ".join(["%s"] * len(columns))
+			insert_query = f'INSERT INTO {table_name} ({column_str}) VALUES ({placeholders})'
+			
+			# Log the query for debugging
+			self._logger.debug(f"Insert query: {insert_query}")
+			
+			# Convert DataFrame to list of tuples for insertion
+			# Extract only the columns we're inserting (excluding id)
+			df_for_insert = df_copy[columns]
+			data = [tuple(x) for x in df_for_insert.to_numpy()]
+			
+			# Execute in batches to avoid memory issues with large datasets
+			batch_size = 1000
+			row_count = 0
+			
+			for i in range(0, len(data), batch_size):
+				batch = data[i:i+batch_size]
+				cursor.executemany(insert_query, batch)
+				row_count += len(batch)
+				self._logger.debug(f"Inserted batch of {len(batch)} rows into {table_name}")
+			
+			return row_count
+			
+		except Exception as e:
+			self._logger.error(f"Error in _insert_dataframe: {str(e)}")
+			# Re-raise to be handled by caller
+			raise
+	
+	def close(self):
+		"""Close the database connection and stop the worker thread."""
+		self._stop_worker()
+		
+		if self._connection:
+			try:
+				self._connection.close()
+				self._logger.info("Database connection closed")
+			except Exception as e:
+				self._logger.error(f"Error closing database connection: {str(e)}")
+			finally:
+				self._connection = None
+
+	def __del__(self):
+		"""Ensure resources are cleaned up when object is garbage collected."""
+		self.close()
