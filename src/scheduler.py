@@ -12,9 +12,12 @@ from typing import Dict, List, Optional, Any, Callable, Set, Tuple, Union, cast
 from concurrent.futures import Future
 from pathlib import Path
 import signal
+import json
 
 from interfaces import IConfigProvider
-from connectors import WebConnector
+from connectors import WebConnector, CycleIdentifier
+from reporter import DataQualityCheckerFactory
+from processors import DataProcessorFactory
 
 
 class DataScheduler:
@@ -79,7 +82,7 @@ class DataScheduler:
 				
 			# Schedule immediate task for this cycle and date
 			if self._event_loop is not None:
-				self._logger.info(f"Scheduling data retrieval for {endpoint} date {date_str} cycle {cycle}")
+				self._logger.debug(f"Scheduling data retrieval for {endpoint} date {date_str} cycle {cycle}")
 				try:
 					task = asyncio.run_coroutine_threadsafe(
 						self._fetch_endpoint_data(endpoint, cycle, date),
@@ -127,7 +130,10 @@ class DataScheduler:
 					api_params = list_params[0]
 				else:
 					api_params = self._endpoint_params
-					
+			
+			# Track if files came from cache for quality check decision
+			from_cache = False
+	
 			# Pass the date and params to the connector
 			success, files = await self._connector.fetch_data_with_retry(
 				endpoint, 
@@ -136,12 +142,53 @@ class DataScheduler:
 				**api_params
 			)
 			
+			# Check if these are cached files by looking at the connector's response
+			if hasattr(self._connector, 'last_response_from_cache'):
+				from_cache = self._connector.last_response_from_cache
+
 			if success:
-				self._logger.info(f"Successfully retrieved {len(files)} files for {endpoint} date {date_str}" +
+				if len(files) > 0:
+					self._logger.info(f"Successfully retrieved {len(files)} file(s) for {endpoint} date {date_str}")
+					
+					# Only apply processors to newly downloaded files
+					if not from_cache:
+						# Step 1: Sanitize headers first
+						header_sanitizer = DataProcessorFactory.create_processor('header_sanitizer', self._config)
+						for file_path in files:
+							try:
+								header_sanitizer.process(file_path)
+							except Exception as e:
+								self._logger.warning(f"Failed to sanitize headers in {file_path}: {e}")
+						
+						# Step 2: Add lineage information next
+						lineage_processor = DataProcessorFactory.create_processor('lineage', self._config)
+						for file_path in files:
+							try:
+								lineage_processor.process(file_path)
+							except Exception as e:
+								self._logger.warning(f"Failed to add lineage to {file_path}: {e}")
+
+						# Step 3: Run CapacityDataProcessor for each file
+						capacity_processor = DataProcessorFactory.create_processor('capacity', self._config)
+						for file_path in files:
+							try:
+								capacity_processor.process(file_path)
+							except Exception as e:
+								self._logger.warning(f"Failed to process capacity data in {file_path}: {e}")
+
+						# Step 4: Run data quality check after all processing is complete
+						if self._config.get_config('data_quality_report'):
+							await self._process_data_quality(endpoint, files, cycle, date)
+							
+					elif from_cache and len(files) > 0:
+						self._logger.debug(f"Skipping processing for cached files {[file.name for file in files]} from {endpoint}")
+				else:
+					self._logger.debug(f"No files retrieved for {endpoint} date {date_str}" +
 								(f" cycle {cycle}" if cycle is not None else ""))
+				
 			else:
-				self._logger.error(f"Failed to retrieve data for {endpoint} date {date_str}" +
-								(f" cycle {cycle}" if cycle is not None else ""))
+				self._logger.debug(f"No data found for {endpoint} date {date_str}" +
+							(f" cycle {cycle}" if cycle is not None else ""))
 			
 			# Clean up task tracking
 			if cycle is not None and date is not None:
@@ -156,7 +203,56 @@ class DataScheduler:
 		except Exception as e:
 			self._logger.error(f"Error fetching data for {endpoint}: {str(e)}")
 			return False, []
-	
+
+	async def _process_data_quality(self, endpoint: str, files: List[Path], cycle: Optional[int] = None,
+								date: Optional[datetime] = None) -> None:
+		"""
+		Process data quality for downloaded files.
+		
+		Args:
+			endpoint: API endpoint
+			files: List of downloaded files
+			cycle: Optional cycle number
+			date: Optional specific date
+		"""		
+		try:
+			self._logger.info(f"Running data quality check for {len(files)} files from {endpoint}")
+			
+			# Determine data type from endpoint for quality checker
+			data_type = 'capacity' if 'capacity' in endpoint else 'default'
+			
+			# Create data quality checker
+			quality_checker = DataQualityCheckerFactory.create_checker(data_type, self._config)
+			
+			# Process each file once
+			for file_path in files:
+				try:
+					# Skip extremely small files (likely empty)
+					if file_path.stat().st_size < 200:
+						self._logger.debug(f"Skipping quality check for file that's too small: {file_path}")
+						continue
+					
+					self._logger.debug(f"Checking data quality for file: {file_path}")
+					
+					# Run quality check on processed data
+					quality_report = quality_checker.check_data_quality(file_path)
+					
+					# Save quality report with descriptive name
+					report_name = f"quality_{file_path.stem}"
+					report_path = quality_checker.save_report(report_name)
+					
+					# Log quality check results
+					if quality_report.passed:
+						self._logger.info(f"{file_path.name} passed data quality check with score {quality_report.quality_score:.2f}")
+					else:
+						self._logger.warning(f"{file_path.name} failed data quality check with score {quality_report.quality_score:.2f}")
+						
+				except Exception as e:
+					self._logger.error(f"Error checking data quality for {file_path}: {str(e)}")
+					
+		except Exception as e:
+			self._logger.error(f"Error in data quality processing: {str(e)}")
+
 	async def _scheduled_task(self, endpoint: str, interval_hours: float) -> None:
 		"""
 		Run a scheduled task at regular intervals.
@@ -174,9 +270,11 @@ class DataScheduler:
 		except Exception as e:
 			self._logger.error(f"Error in scheduled task for {endpoint}: {str(e)}")
 
-	def schedule_endpoint(self, endpoint: str, interval_hours: float = 24.0, params: Optional[Dict[str, Any]] = None) -> bool:
-		"""Schedule regular data retrieval for an endpoint.
-		
+	def schedule_endpoint(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> bool:
+		"""
+		Schedule a recurring, time-based trigger for retrieving data from the endpoint.
+		Allows balancing between getting timely data updates and minimizing system load.
+
 		Args:
 			endpoint: Endpoint to schedule
 			interval_hours: Hours between scheduled runs
@@ -200,6 +298,10 @@ class DataScheduler:
 		self._scheduled_endpoints.add(endpoint)
 		
 		# Create and schedule the task
+		interval_hours = self._config.get_config('schedule_interval_hours', 1.0) 
+		if not isinstance(interval_hours, float) or interval_hours <= 0:
+			interval_hours = abs(float(interval_hours))
+		self._logger.debug(f"Scheduling endpoint {endpoint} with interval {interval_hours} hours")
 		if self._event_loop is not None:
 			task = asyncio.run_coroutine_threadsafe(
 				self._scheduled_task(endpoint, interval_hours),
@@ -367,7 +469,6 @@ class CycleMonitor:
 	
 	def _check_historical_data(self) -> None:
 		"""Check for historical data and ensure all cycles are downloaded."""
-		# Get dates based on history setting (excluding today)
 		today = datetime.now().date()
 		dates = []
 		for i in range(1, self._history + 1):
@@ -385,11 +486,15 @@ class CycleMonitor:
 			else:
 				api_params = self._params
 		
-		# For each past date, check all cycles
+		# Convert parameters to string keys
+		string_api_params = {str(k): v for k, v in api_params.items()} if isinstance(api_params, dict) else {}
+		
+		# For each past date, try all possible cycles (1-8)
 		for date in dates:
 			date_str = date.strftime("%Y%m%d")
 			
-			for cycle in [1, 2, 3]:
+			# Try all possible cycle numbers instead of assuming fixed mappings
+			for cycle in range(1, 9):  # Try cycles 1 through 8
 				# Skip if already downloaded in this session
 				download_key = (date_str, cycle)
 				if download_key in self._downloaded_data:
@@ -397,17 +502,28 @@ class CycleMonitor:
 					continue
 				
 				# Check persistent cache first with params
-				string_api_params = {str(k): v for k, v in api_params.items()} if isinstance(api_params, dict) else {}
 				if self._connector.is_in_cache(self._endpoint, cycle, date, **string_api_params):
-					self._logger.info(f"Data for {self._endpoint} {date_str} cycle {cycle} already downloaded")
-					# Add to downloaded data to avoid reprocessing
-					self._downloaded_data.add(download_key)
+					# Check if this is actually an intraday cycle we want by examining metadata
+					cached_path = self._connector.get_cached_file_path(self._endpoint, cycle, date)
+					if cached_path:
+						metadata_dir = Path(self._config.get_config('output_dir')) / "metadata"
+						metadata_path = metadata_dir / f"{cached_path.stem}.meta.json"
+						if metadata_path.exists():
+							try:
+								with open(metadata_path, 'r') as f:
+									metadata = json.load(f)
+									cycle_name = metadata.get('cycle_name')
+									if cycle_name and "intraday" in cycle_name.lower():
+										self._logger.info(f"Data for {self._endpoint} date: {date_str} {cycle_name} is already downloaded")
+										# Add to downloaded data to avoid reprocessing
+										self._downloaded_data.add(download_key)
+							except Exception as e:
+								self._logger.warning(f"Error reading metadata: {e}")
 					continue
 				
-				# Notify the connector with parameters
-				self._logger.debug(f"Data for {self._endpoint} {date_str} cycle {cycle} not in cache, scheduling download")
-				if cycle is not None and date is not None:
-					self._connector.notify_cycle_update(cycle, date=date)
+				# Notify the connector to try this cycle
+				self._logger.debug(f"Checking for intraday data with cycle={cycle} for {self._endpoint} {date_str}")
+				self._connector.notify_cycle_update(cycle, date=date)
 				self._downloaded_data.add(download_key)
 	
 	def _check_for_new_cycles(self) -> None:
@@ -415,17 +531,6 @@ class CycleMonitor:
 		current_hour = datetime.now().hour
 		today = datetime.now()
 		today_str = today.strftime("%Y%m%d")
-		
-		# Determine which cycles should be available now
-		available_cycles = []
-		if current_hour >= 15 and current_hour < 20:
-			available_cycles.append(1)
-		elif current_hour >= 20 and current_hour < 23:
-			available_cycles.append(2)
-		elif current_hour >= 23 or current_hour < 3:
-			# Cycle 3 is available from 23:00 to 03:00 next day,
-			# which is completely arbitrary like the other cycles definitions...
-			available_cycles.append(3)
 		
 		# Get API parameters if any
 		api_params = {}
@@ -440,24 +545,53 @@ class CycleMonitor:
 		# Convert parameters to string keys
 		string_api_params = {str(k): v for k, v in api_params.items()} if isinstance(api_params, dict) else {}
 		
-		# Check each potentially available cycle
-		for cycle in available_cycles:
+		# Determine which intraday cycles might be available based on time
+		# Rather than mapping to specific cycle numbers, we'll try all possible cycles
+		expected_intraday = []
+		if current_hour >= 15 and current_hour < 20:
+			expected_intraday.append("Intraday 1")
+		elif current_hour >= 20 and current_hour < 23:
+			expected_intraday.append("Intraday 1")
+			expected_intraday.append("Intraday 2")
+		elif current_hour >= 23 or current_hour < 3:
+			expected_intraday.append("Intraday 1")
+			expected_intraday.append("Intraday 2")
+			expected_intraday.append("Intraday 3")
+		
+		# Log which intraday cycles we expect to be available
+		if expected_intraday:
+			self._logger.info(f"Based on current time ({current_hour}:00), expecting data for: {', '.join(expected_intraday)}")
+		
+		# Try all possible cycle numbers to find intraday data
+		for cycle in range(1, 9):  # Try cycles 1 through 8
 			# Skip if already downloaded in this session
 			download_key = (today_str, cycle)
 			if download_key in self._downloaded_data:
 				self._logger.debug(f"Data for {self._endpoint} cycle {cycle} already processed in this session")
 				continue
 			
-			# Check persistent cache before scheduling - PASS THE PARAMETERS HERE
+			# Check persistent cache before scheduling
 			if self._connector.is_in_cache(self._endpoint, cycle, today, **string_api_params):
 				cached_path = self._connector.get_cached_file_path(self._endpoint, cycle, today)
-				self._logger.info(f"Data for {self._endpoint} {today_str} cycle {cycle} already in cache: {cached_path}")
-				# Add to downloaded data to avoid reprocessing
-				self._downloaded_data.add(download_key)
+				# Check if this is an intraday cycle we want
+				if cached_path:
+					metadata_dir = Path(self._config.get_config('output_dir')) / "metadata"
+					metadata_path = metadata_dir / f"{cached_path.stem}.meta.json"
+					if metadata_path.exists():
+						try:
+							with open(metadata_path, 'r') as f:
+								metadata = json.load(f)
+								cycle_name = metadata.get('cycle_name')
+								if cycle_name and "intraday" in cycle_name.lower():
+									self._logger.info(f"Data for {self._endpoint} date: {today_str} {cycle_name} is already downloaded")
+									# Add to downloaded data to avoid reprocessing
+									self._downloaded_data.add(download_key)
+						except Exception as e:
+							self._logger.warning(f"Error reading metadata: {e}")
 				continue
 				
-			# Notify the connector
-			self._logger.info(f"New data available for {self._endpoint} cycle {cycle}, not in cache, scheduling download")
+			# Notify the connector to try this cycle - it will filter non-intraday data
+			self._logger.info(f"Checking for intraday data with cycle={cycle} for {self._endpoint}")
 			self._connector.notify_cycle_update(cycle, date=today)
 			self._downloaded_data.add(download_key)
 	

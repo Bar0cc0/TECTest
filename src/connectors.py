@@ -72,6 +72,9 @@ class WebConnector(IConnector):
 		# Request cache to prevent duplicate downloads
 		self._request_cache = set()
 
+		# Add tracking property for cache status
+		self.last_response_from_cache = False
+
 	def _load_cache(self) -> Dict[str, float]:
 		"""
 		Load the download cache from file.
@@ -96,24 +99,38 @@ class WebConnector(IConnector):
 		except IOError as e:
 			self._logger.error(f"Error saving cache file: {e}")
 	
-	def _get_cache_key(self, endpoint: str, date: datetime, cycle: Optional[int] = None, **params) -> str:
+	def _get_cache_key(self, endpoint: str, date: datetime, cycle: Optional[int] = None, 
+					cycle_name: Optional[str] = None, **params) -> str:
 		"""
 		Generate a unique cache key for a download request.
 		
 		Args:
 			endpoint: Endpoint
 			date: Date for the request
-			cycle: Optional cycle number
+			cycle: Optional cycle number (used only if cycle_name not provided)
+			cycle_name: Optional cycle name (takes precedence over cycle number)
 			params: Additional parameters
 			
 		Returns:
 			Cache key string
 		"""
 		date_str = date.strftime("%Y%m%d")
-		cycle_str = f"_cycle{cycle}" if cycle is not None else ""
-		param_str = "_".join(f"{k}={v}" for k, v in sorted(params.items())) if params else ""
 		
-		# Create a unique key that combines all parameters
+		# If we have the actual cycle name from the response, use it
+		# Otherwise fall back to the numeric cycle
+		if cycle_name:
+			# Normalize the cycle name for consistent keys (lowercase, no spaces)
+			norm_cycle_name = cycle_name.lower().replace(' ', '_')
+			cycle_str = f"_{norm_cycle_name}"
+		else:
+			# Use numeric cycle as temporary identifier
+			cycle_str = f"_cycle{cycle}" if cycle is not None else ""
+		
+		# Only include non-empty parameters
+		param_items = [(k, v) for k, v in sorted(params.items()) if v]
+		param_str = "_".join(f"{k}={v}" for k, v in param_items) if param_items else ""
+		
+		# Create a unique key with date, cycle and params
 		return f"{endpoint}_{date_str}{cycle_str}_{param_str}"
 	
 	def _cleanup_expired_files(self) -> None:
@@ -146,7 +163,7 @@ class WebConnector(IConnector):
 					if file_path.exists():
 						try:
 							file_path.unlink()
-							self._logger.info(f"Deleted expired file: {file_path}")
+							self._logger.debug(f"Deleted expired file: {file_path}")
 						except IOError as e:
 							self._logger.error(f"Error deleting expired file {file_path}: {e}")
 					
@@ -203,7 +220,7 @@ class WebConnector(IConnector):
 				if current_time - timestamp <= self._cache_ttl:
 					return True
 					
-				# Cache expired - handle expiration
+				# Cache expired, handle expiration
 				self._logger.info(f"Cache entry expired for {cache_key}")
 				return False
 				
@@ -369,7 +386,37 @@ class WebConnector(IConnector):
 		except Exception as e:
 			self._logger.error(f"Error downloading {url}: {str(e)}")
 			return False
-	
+
+	def _sanitize_filename(self, filename: str) -> str:
+		"""
+		Sanitize a filename to ensure it's valid for the filesystem.
+		Preserves spaces but replaces invalid characters.
+		
+		Args:
+			filename: Original filename
+			
+		Returns:
+			Sanitized filename
+		"""
+		if not filename:
+			return "unnamed_file.csv"
+			
+		# Handle path separators and other problematic characters
+		import re
+		# Remove any directory path components
+		clean_name = Path(filename).name
+		
+		# Replace any characters that are invalid in filenames
+		# but preserve spaces - just replace truly problematic chars
+		invalid_chars = r'[<>:"/\\|?*]'
+		clean_name = re.sub(invalid_chars, '_', clean_name)
+		
+		# Ensure we have a non-empty filename
+		if not clean_name or clean_name.startswith('.'):
+			clean_name = f"unnamed_{int(time.time())}.csv"
+			
+		return clean_name
+
 	async def fetch_data(self, endpoint: str, cycle: Optional[int] = None, 
 						date: Optional[datetime] = None, **params) -> Tuple[bool, List[Path]]:
 		"""
@@ -384,47 +431,85 @@ class WebConnector(IConnector):
 		Returns:
 			Tuple of (success_flag, list_of_downloaded_files)
 		"""
-		# Use provided date or today
 		if date is None:
 			date = datetime.now()
 		
 		downloaded_files = []
 		
-		# Generate cache key
-		cache_key = self._get_cache_key(endpoint, date, cycle, **params)
+		# Generate initial cache key using numeric cycle
+		initial_cache_key = self._get_cache_key(endpoint, date, cycle, **params)
 		
 		# Check in-memory cache to avoid duplicates in same session
-		if cache_key in self._request_cache:
-			self._logger.info(f"Skipping already processed request in this session: {cache_key}")
+		if initial_cache_key in self._request_cache:
+			self._logger.debug(f"Skipping already processed request in this session: {initial_cache_key}")
 			return True, []
 		
-		# Check persistent cache if enabled
-		if self._cache_enabled and cache_key in self._download_cache:
-			# Check if file exists
+		# Check persistent cache if enabled, using metadata to find files by actual cycle name
+		if self._cache_enabled:
 			date_str = date.strftime("%Y%m%d")
-			cycle_str = f"_cycle{cycle}" if cycle is not None else ""
 			endpoint_dir = endpoint.replace('/', '_')
 			output_dir = self._output_dir / endpoint_dir
-			output_path = output_dir / f"{date_str}{cycle_str}.{self._format}"
+			metadata_dir = self._output_dir / "metadata"
+			matching_files = []
 			
-			if output_path.exists():
-				self._logger.info(f"Using cached file: {output_path}")
-				
-				# Update timestamp in cache
-				self._download_cache[cache_key] = time.time()
-				self._save_cache()
-				
-				# Add to in-memory cache
-				self._request_cache.add(cache_key)
-				
-				return True, [output_path]
-			else:
-				# File missing, remove from cache
-				del self._download_cache[cache_key]
-				self._save_cache()
+			if metadata_dir.exists() and output_dir.exists():
+				# Try to find matching files based on metadata
+				for meta_file in metadata_dir.glob("*.meta.json"):
+					try:
+						with open(meta_file, 'r') as f:
+							metadata = json.load(f)
+							# Check if this metadata matches our request parameters
+							if (metadata.get('endpoint') == endpoint and 
+								metadata.get('date') == date_str):
+								
+								# Only include files with intraday cycle name
+								cycle_name = metadata.get('cycle_name')
+								if not cycle_name or not cycle_name.lower().startswith('intraday'):
+									continue
+								
+								# If specific cycle requested, verify it matches
+								# We check either the numeric cycle OR the cycle name if available
+								if cycle is not None:
+									if metadata.get('requested_cycle') != cycle:
+										continue
+									
+								# Create cache key with the actual cycle name
+								actual_cache_key = self._get_cache_key(endpoint, date, None, cycle_name, **params)
+								
+								# Check if this cache entry is still valid
+								if actual_cache_key in self._download_cache:
+									current_time = time.time()
+									timestamp = self._download_cache[actual_cache_key]
+									if current_time - timestamp > self._cache_ttl:
+										# Expired cache entry
+										continue
+										
+									# Get the saved filename from metadata
+									saved_filename = metadata.get('saved_filename')
+									if saved_filename:
+										file_path = output_dir / saved_filename
+										if file_path.exists():
+											# Skip tiny files (likely empty)
+											if file_path.stat().st_size < 200:
+												self._logger.debug(f"Skipping cached file that's too small: {file_path}")
+												continue
+											
+											matching_files.append(file_path)
+											self._logger.info(f"Using cached file: {file_path} (cycle: {cycle_name})")
+											
+											# Add to in-memory cache
+											self._request_cache.add(initial_cache_key)
+					except (json.JSONDecodeError, IOError) as e:
+						self._logger.warning(f"Error reading metadata file {meta_file}: {e}")
+						continue
+			
+			if matching_files:
+				# Set flag that this response came from cache
+				self.last_response_from_cache = True
+				return True, matching_files
 		
 		# Add to in-memory cache before downloading
-		self._request_cache.add(cache_key)
+		self._request_cache.add(initial_cache_key)
 		
 		# Create async HTTP session
 		async with aiohttp.ClientSession() as session:
@@ -432,29 +517,117 @@ class WebConnector(IConnector):
 			url = self._build_url(endpoint, date, cycle, **params)
 			self._logger.debug(f"Fetching data from URL: {url}")
 			
-			# Determine output filename - always include cycle in filename
-			date_str = date.strftime("%Y%m%d")
-			cycle_str = f"_cycle{cycle}" if cycle is not None else ""
+			# Make the HTTP request to extract the original filename
+			async with session.get(url, timeout=self._timeout) as response:
+				if response.status == 200:
+					# Check content length first - skip tiny files (likely empty)
+					content_length = response.headers.get('Content-Length')
+					if content_length and int(content_length) < 200:
+						self._logger.debug(f"Skipping likely empty file ({content_length} bytes)")
+						return False, []
+					
+					# Extract the original filename from Content-Disposition header
+					original_filename = None
+					content_disposition = response.headers.get('Content-Disposition')
+					if content_disposition:
+						import re
+						match = re.search(r'filename="?([^"]+)"?', content_disposition)
+						if match:
+							original_filename = match.group(1)
+							self._logger.debug(f"Original filename from response: {original_filename}")
+					
+					# If no original filename found, generate one based on endpoint and date
+					if not original_filename:
+						date_str = date.strftime("%Y%m%d")
+						original_filename = f"{endpoint.replace('/', '_')}_{date_str}.{self._format}"
+						self._logger.warning(f"No original filename found, using generated name: {original_filename}")
+					
+					# Determine the actual cycle based on the original filename
+					cycle_name = None
+					if original_filename:
+						cycle_name = CycleIdentifier.get_cycle_from_filename(original_filename)
+						if cycle_name:
+							self._logger.debug(f"Identified cycle: {cycle_name} from filename: {original_filename}")
+							if cycle is not None:
+								self._logger.debug(f"Requested cycle {cycle} but file indicates {cycle_name}")
+					
+					# Only allow files with Intraday cycle names
+					if not cycle_name or not cycle_name.lower().startswith('intraday'):
+						self._logger.debug(f"Skipping non-intraday file: {original_filename}")
+						return False, []
+					
+					# Read response content to check file size and content
+					content = await response.read()
+					
+					# Skip if file is too small (likely empty or just headers)
+					if len(content) < 200:
+						self._logger.debug(f"Skipping file with content size {len(content)} bytes (likely empty)")
+						return False, []
+					
+					# Create directory structure
+					endpoint_dir = endpoint.replace('/', '_')
+					output_dir = self._output_dir / endpoint_dir
+					output_dir.mkdir(parents=True, exist_ok=True)
+					
+					# Use original filename for output, but sanitize it for filesystem safety
+					safe_original_filename = self._sanitize_filename(original_filename)
+					output_path = output_dir / safe_original_filename
+					
+					# Save the response content
+					with open(output_path, 'wb') as f:
+						f.write(content)
+					
+					# Create metadata directory
+					metadata_dir = self._output_dir / "metadata"
+					metadata_dir.mkdir(parents=True, exist_ok=True)
+					
+					# Store metadata about this file
+					download_timestamp = datetime.now()
+					metadata = {
+						'endpoint': endpoint,
+						'requested_cycle': cycle,
+						'cycle_name': cycle_name,
+						'date': date.strftime("%Y%m%d"),
+						'original_filename': original_filename,
+						'saved_filename': safe_original_filename,
+						'download_time': download_timestamp.isoformat(),
+						'download_timestamp': time.time()
+					}
+					
+					metadata_filename = f"{output_path.stem}.meta.json"
+					metadata_path = metadata_dir / metadata_filename
+					
+					# Write metadata to file
+					with open(metadata_path, 'w') as f:
+						json.dump(metadata, f, indent=2)
+					
+					downloaded_files.append(output_path)
+					
+					# Update cache with current timestamp - using the actual cycle name
+					if self._cache_enabled and cycle_name:
+						# Create a new cache key with the actual cycle name from the response
+						actual_cache_key = self._get_cache_key(endpoint, date, None, cycle_name, **params)
+						self._download_cache[actual_cache_key] = time.time()
+						self._save_cache()
+					
+					self._logger.info(f"Downloaded {len(content)} bytes to {output_path} (cycle: {cycle_name})")
+				else:
+					self._logger.error(f"Error fetching data: {response.status} {response.reason}")
 			
-			# Create directory structure
-			endpoint_dir = endpoint.replace('/', '_')
-			output_dir = self._output_dir / endpoint_dir
-			output_dir.mkdir(parents=True, exist_ok=True)
-			
-			output_path = output_dir / f"{date_str}{cycle_str}.{self._format}"
-			
-			# Download the file
-			success = await self._download_file(session, url, output_path)
-			if success:
-				downloaded_files.append(output_path)
-				
-				# Update cache with current timestamp
-				if self._cache_enabled:
-					self._download_cache[cache_key] = time.time()
-					self._save_cache()
-		
 		return len(downloaded_files) > 0, downloaded_files
-	
+
+	def _save_metadata(self, file_path: Path, metadata: Dict[str, Any]) -> None:
+		"""Save metadata for a downloaded file."""
+		try:
+			# Create metadata file path
+			metadata_path = file_path.with_suffix('.meta.json')
+			
+			# Write metadata to file
+			with open(metadata_path, 'w') as f:
+				json.dump(metadata, f, indent=2)
+		except Exception as e:
+			self._logger.warning(f"Error saving metadata: {e}")
+
 	async def fetch_data_with_retry(self, endpoint: str, cycle: Optional[int] = None, **params) -> Tuple[bool, List[Path]]:
 		"""
 		Fetch data with retry logic.
@@ -478,14 +651,73 @@ class WebConnector(IConnector):
 				attempt += 1
 				if attempt < self._retry_attempts:
 					wait_time = 2 ** attempt  # Exponential backoff
-					self._logger.info(f"Retry {attempt} for {endpoint} in {wait_time} seconds")
+					self._logger.debug(f"Retry {attempt} for {endpoint} cycle {cycle} in {wait_time} seconds")
 					await asyncio.sleep(wait_time)
 			except Exception as e:
-				self._logger.error(f"Error during attempt {attempt} for {endpoint}: {str(e)}")
+				self._logger.error(f"Error during attempt {attempt} for {endpoint} cycle {cycle}: {str(e)}")
 				attempt += 1
 				if attempt < self._retry_attempts:
 					await asyncio.sleep(2 ** attempt)
-		
-		self._logger.error(f"Failed to fetch data for {endpoint} after {self._retry_attempts} attempts")
+
+		self._logger.error(f"Failed to fetch data for {endpoint} cycle {cycle} after {self._retry_attempts} attempts")
 		return False, []
+
+
+
+class CycleIdentifier:
+	"""Extract cycle information from original HTTP response filenames."""
 	
+	# Constants for cycle types we care about
+	INTRADAY_1 = "Intraday 1"
+	INTRADAY_2 = "Intraday 2" 
+	INTRADAY_3 = "Intraday 3"
+	TIMELY = "Timely"
+	EVENING = "Evening"
+	FINAL = "Final"
+	
+	@staticmethod
+	def get_cycle_from_filename(filename: str) -> Optional[str]:
+		"""
+		Extract cycle descriptive name directly from the filename.
+		
+		Args:
+			filename: Original filename from HTTP response
+			
+		Returns:
+			Standardized descriptive cycle name or None if couldn't be determined
+		"""
+		# Remove path information if present
+		filename = Path(filename).name.lower()
+		
+		# Look for common patterns in the filename
+		if "intraday" in filename or "intra" in filename:
+			# Try to extract the intraday number
+			import re
+			match = re.search(r'intraday\s*(\d)', filename, re.IGNORECASE)
+			if match:
+				intraday_num = int(match.group(1))
+				if intraday_num == 1:
+					return CycleIdentifier.INTRADAY_1
+				elif intraday_num == 2:
+					return CycleIdentifier.INTRADAY_2
+				elif intraday_num == 3:
+					return CycleIdentifier.INTRADAY_3
+		
+		# Check for other cycle types
+		if "timely" in filename:
+			return CycleIdentifier.TIMELY
+		elif "evening" in filename:
+			return CycleIdentifier.EVENING
+		elif "final" in filename:
+			return CycleIdentifier.FINAL
+				
+		return None
+	
+	@staticmethod
+	def is_intraday_cycle(cycle_name: str) -> bool:
+		"""Check if the cycle name is an intraday cycle."""
+		return cycle_name in [
+			CycleIdentifier.INTRADAY_1, 
+			CycleIdentifier.INTRADAY_2, 
+			CycleIdentifier.INTRADAY_3
+		]
