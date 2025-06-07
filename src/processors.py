@@ -91,9 +91,9 @@ class CapacityDataProcessor(DataProcessor):
 			
 			# Save processed data back to the original file
 			df.to_csv(data_file, index=False)
-			
-			self.logger.info(f"Processed data saved back to original file: {data_file}")
-			
+
+			self.logger.debug(f"Processed data saved back to original file: {data_file}")
+
 			return data_file
 			
 		except Exception as e:
@@ -120,7 +120,7 @@ class CapacityDataProcessor(DataProcessor):
 				# Replace qty_reason containing 'unavailable' with 'N'
 				df_fixed.loc[unavailable_mask, 'qty_reason'] = 'N'
 				
-				self.logger.info(f"Converted {unavailable_count} 'unavailable' values in qty_reason column to 'N'")
+				self.logger.debug(f"Converted {unavailable_count} 'unavailable' values in qty_reason column to 'N'")
 		
 		return df_fixed
 	
@@ -219,7 +219,7 @@ class LineageProcessor(DataProcessor):
 					else:
 						# Use file modification time as fallback
 						download_timestamp = data_file.stat().st_mtime
-						self.logger.debug(f"Using file modification time as timestamp fallback")
+						self.logger.debug(f"Using file modification time as timestamp fallback for {data_file}: {download_timestamp}")
 				except Exception as e:
 					self.logger.warning(f"Error reading metadata, using fallback values: {e}")
 			else:
@@ -240,18 +240,18 @@ class LineageProcessor(DataProcessor):
 			df = pd.read_csv(data_file)
 
 			# Check if lineage columns already exist: if they do, don't modify the file
-			if 'cycle_id' in df.columns and 'timestamp' in df.columns:
+			if 'cycle_id' in df.columns and 'download_timestamp' in df.columns:
 				self.logger.debug(f"Lineage information already exists in {data_file}, skipping")
 				return data_file
 			
-			# Add lineage columns, overwriting if they already exist
+			# Add lineage columns
 			df['cycle_id'] = cycle_id
-			df['timestamp'] = download_timestamp
+			df['download_timestamp'] = download_timestamp
 			
 			# Save back to the original file
 			df.to_csv(data_file, index=False)
-			
-			self.logger.info(f"Added lineage information to {data_file}: cycle_id={cycle_id}, timestamp={download_timestamp}")
+
+			self.logger.info(f"Added lineage information to {data_file}: cycle_id={cycle_id}, download_timestamp={download_timestamp}")
 			return data_file
 			
 		except Exception as e:
@@ -333,9 +333,9 @@ class HeaderSanitizerProcessor(DataProcessor):
 			# Log the changes
 			for old, new in sanitized_headers.items():
 				if old != new:
-					self.logger.debug(f"Renamed column: '{old}' → '{new}'")
+					self.logger.debug(f"Renamed column: '{old}' -> '{new}'")
 			
-			self.logger.info(f"Sanitized {len([old for old, new in sanitized_headers.items() if old != new])} headers in {data_file}")
+			self.logger.debug(f"Sanitized {len([old for old, new in sanitized_headers.items() if old != new])} headers in {data_file}")
 			return data_file
 			
 		except Exception as e:
