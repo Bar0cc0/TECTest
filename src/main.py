@@ -21,7 +21,7 @@ import logging
 
 from interfaces import IConfigProvider
 from configuration import Configuration
-from connectors import WebConnector
+from connectors import WebConnector, DatabaseConnector
 from scheduler import DataScheduler, CycleMonitor
 
 
@@ -47,9 +47,10 @@ async def run_data_pipeline(config: IConfigProvider, endpoint: str,
 		bool: True if the pipeline ran successfully, False otherwise (e.g., if interrupted)
 	"""
 	# Initialize components
-	connector = WebConnector(config)
-	scheduler = DataScheduler(config, connector)
-	monitor = CycleMonitor(config, connector, endpoint=endpoint, params=params)
+	webconnector = WebConnector(config)
+	databaseconnector = DatabaseConnector(config)
+	scheduler = DataScheduler(config, webconnector, databaseconnector)
+	monitor = CycleMonitor(config, webconnector, endpoint=endpoint, params=params)
 	logger = config.get_logger()
 	
 	try:
