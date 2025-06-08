@@ -563,7 +563,7 @@ retry attempts: {self._retry_attempts}""")
 						if not original_filename:
 							date_str = date.strftime("%Y%m%d")
 							original_filename = f"{endpoint.replace('/', '_')}_{date_str}.{self._format}"
-							self._logger.warning(f"No original filename found, using generated name: {original_filename}")
+							self._logger.warning(f"No original filename found: {content_disposition}")
 						
 						# Determine the actual cycle based on the original filename
 						cycle_name = None
