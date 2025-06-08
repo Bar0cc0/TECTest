@@ -156,31 +156,22 @@ class DataScheduler:
 					
 					# Only apply processors to newly downloaded files
 					if not from_cache:
-						# Step 1: Sanitize headers first
-						header_sanitizer = DataProcessorFactory.create_processor('header_sanitizer', self._config)
+						# Create a data processing pipeline based on the endpoint
+						pipeline = DataProcessorFactory.create_pipeline(
+							data_type='capacity' if 'capacity' in endpoint else 'default',
+							config=self._config
+						)
+						
+						# Process all files through the pipeline
 						for file_path in files:
 							try:
-								header_sanitizer.process(file_path)
+								processed_file = pipeline.process(file_path)
+								if not processed_file:
+									self._logger.warning(f"Failed to process {file_path} through pipeline")
 							except Exception as e:
-								self._logger.warning(f"Failed to sanitize headers in {file_path}: {e}")
+								self._logger.warning(f"Error processing {file_path}: {str(e)}")
 						
-						# Step 2: Add lineage information next
-						lineage_processor = DataProcessorFactory.create_processor('lineage', self._config)
-						for file_path in files:
-							try:
-								lineage_processor.process(file_path)
-							except Exception as e:
-								self._logger.warning(f"Failed to add lineage to {file_path}: {e}")
-						
-						# Step 3: Run CapacityDataProcessor for each file
-						capacity_processor = DataProcessorFactory.create_processor('capacity', self._config)
-						for file_path in files:
-							try:
-								capacity_processor.process(file_path)
-							except Exception as e:
-								self._logger.warning(f"Failed to process capacity data in {file_path}: {e}")
-						
-						# Step 4: Queue files for database loading if enabled
+						# Queue files for database loading if enabled
 						if self._db_connector and self._config.get_config('enable_database_loading', True):
 							table_name = self._get_table_name_for_endpoint(endpoint)
 							success = self._db_connector.post_data(table_name, files, cycle, date)
@@ -189,7 +180,7 @@ class DataScheduler:
 							else:
 								self._logger.error(f"Failed to queue files for database loading to table '{table_name}'")
 						
-						# Step 5: Run data quality check after all processing is complete
+						# Run data quality check after all processing is complete
 						if self._config.get_config('data_quality_report'):
 							await self._process_data_quality(endpoint, files, cycle, date)
 							
