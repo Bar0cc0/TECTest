@@ -64,7 +64,7 @@ class Configuration(IConfigProvider):
 		
 		# Set up logging
 		self._initialize_logging(loglevel)
-		self._logger.debug('Configuration initialized')
+		self._logger.info('Configuration initialized')
 
 	def _initialize_directories(self) -> List[Path]:
 		"""Create required directories."""
@@ -129,9 +129,9 @@ class Configuration(IConfigProvider):
 			self._logger.setLevel(logging.INFO)
 
 		if self.isLoadedFromFile:
-			self._logger.info(f"Configuration loaded from {self._config_path}")
+			self._logger.debug(f"Configuration loaded from {self._config_path}")
 		else:
-			self._logger.info('Using default configuration')
+			self._logger.debug('Using default configuration')
 
 	def _load_default_config(self) -> Dict[str, Any]:
 		"""Load the default configuration."""
