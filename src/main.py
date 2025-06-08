@@ -114,7 +114,25 @@ async def shutdown(signal: signal.Signals, loop: asyncio.AbstractEventLoop,
 
 def run_tests() -> int:
 	"""Run unit tests using the main_unittest.py orchestrator."""
-	return 0
+	try:
+		# Add the parent directory to the path for proper imports
+		tests_dir = Path(__file__).resolve().parent.parent / "tests"
+		if str(tests_dir) not in sys.path:
+			sys.path.append(str(tests_dir))
+			
+		# Import and run the test orchestrator
+		spec = spec_from_file_location("main_unittest", tests_dir / "main_unittest.py")
+		if spec is None or spec.loader is None:
+			print("Error: Could not find main_unittest.py")
+			return 1
+			
+		test_module = module_from_spec(spec)
+		spec.loader.exec_module(test_module)
+		return test_module.main()
+	except Exception as e:
+		print(f"Error running tests: {e}")
+		traceback.print_exc()
+		return 1
 
 def main(endpoint: str, loglevel: str, **params: Any) -> int:
 	"""
