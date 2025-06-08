@@ -156,9 +156,10 @@ class DataScheduler:
 					
 					# Only apply processors to newly downloaded files
 					if not from_cache:
+						asset = self._config.get_config('asset_id')
 						# Create a data processing pipeline based on the endpoint
 						pipeline = DataProcessorFactory.create_pipeline(
-							data_type='capacity' if 'capacity' in endpoint else 'default',
+							data_type='capacity' if 'capacity' in asset else 'default',
 							config=self._config
 						)
 						

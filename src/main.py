@@ -134,7 +134,8 @@ def run_tests() -> int:
 		traceback.print_exc()
 		return 1
 
-def main(endpoint: str, loglevel: str, **params: Any) -> int:
+def main(#endpoint: str, 
+		 loglevel: str, **params: Any) -> int:
 	"""
 	Main function that orchestrates the data ingestion pipeline.
 	
@@ -148,7 +149,7 @@ def main(endpoint: str, loglevel: str, **params: Any) -> int:
 	"""
 
 	# Display application header information in terminal
-	display_header(__version__, endpoint)
+	display_header(__version__)
 
 	# Initialize the configuration
 	config = Configuration(loglevel=loglevel)
@@ -168,6 +169,7 @@ def main(endpoint: str, loglevel: str, **params: Any) -> int:
 	asyncio.set_event_loop(loop)
 	
 	# Create a pipeline task
+	endpoint = config.get_config('endpoint', 'operationally-available')
 	pipeline_task = asyncio.ensure_future(
 		run_data_pipeline(config, endpoint, param_combinations),
 		loop=loop
@@ -227,16 +229,17 @@ if __name__ == "__main__":
 	# Else run normal operation
 	else:
 		# Check if an endpoint is provided
-		if not args.endpoint:
-			parser.error('Parameter required: endpoint')
-			sys.exit(1)
+		#if not args.endpoint:
+		#	parser.error('Parameter required: endpoint')
+		#	sys.exit(1)
 			
 		# Convert params list to dictionary
 		params_dict = parse_params_to_dict(args.params)
 		
 		# Call main function with parsed arguments
 		try:
-			exit_code = main(args.endpoint, loglevel=args.loglevel, **params_dict)
+			exit_code = main(#args.endpoint, 
+					loglevel=args.loglevel, **params_dict)
 			sys.exit(exit_code)
 		except Exception as e:
 			print(f"Unhandled exception: {e}")

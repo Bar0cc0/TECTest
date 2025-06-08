@@ -11,7 +11,7 @@ from itertools import product
 from typing import Dict, List, Any, Union, Optional, Tuple
 
 
-def display_header(version:str, endpoint: str) -> None:
+def display_header(version:str) -> None:
 	"""Display application header with useful information."""
 	current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 	
@@ -21,7 +21,6 @@ def display_header(version:str, endpoint: str) -> None:
 ╠══════════════════════════════════════════════════════════════════╣
 ║ Version:    {version:<52} ║
 ║ Runtime:    {current_time:<52} ║
-║ Endpoint:   {endpoint:<52} ║
 ╠══════════════════════════════════════════════════════════════════╣
 ║ Press Ctrl+C to stop                                             ║
 ╚══════════════════════════════════════════════════════════════════╝
@@ -37,7 +36,6 @@ def create_arg_parser() -> argparse.ArgumentParser:
 		argparse.ArgumentParser: Configured argument parser
 	"""
 	parser = argparse.ArgumentParser(description='TW Data API Clien')
-	parser.add_argument('endpoint', nargs='?', help='Endpoint (e.g., capacity/operationally-available)')
 	parser.add_argument('--params', nargs='+', help='Filters as key=value pairs', default=[])
 	parser.add_argument('--loglevel', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], 
 						default='INFO', help='Set the logging level')

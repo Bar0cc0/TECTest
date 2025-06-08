@@ -335,7 +335,8 @@ retry attempts: {self._retry_attempts}""")
 			Complete URL string
 		"""
 		# Start with base URL and routing path
-		url = f"{self._base_url}{self._routing_path}{endpoint}"
+
+		url = f"{self._base_url}{self._routing_path}{self._asset_id}{endpoint}"
 		
 		# Add required query parameters with defaults
 		query_params = {

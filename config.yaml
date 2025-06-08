@@ -3,7 +3,8 @@ API:
   url: "https://twtransfer.energytransfer.com"
   routing_path: "/ipost/"
   format: "csv"
-  asset_id: "TW"
+  asset_id: "TW/capacity/"
+  endpoint: "operationally-available"
   search_type: "ALL"
   history: 3  # days
   timeout: 30 # seconds
@@ -21,7 +22,7 @@ Database:
   db_password: postgres
 
 endpoint_table_mappings:
-  capacity_operationally-available: operational_capacity
+  operationally-available: operational_capacity
 
 # Data Processing Configuration
 Directories:
