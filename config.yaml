@@ -8,6 +8,8 @@ API:
   history: 3  # days
   timeout: 30 # seconds
   retry_attempts: 3
+  http_session_pool_size: 5
+  max_concurrent_requests: 15
 
 # Database Configuration
 Database:
