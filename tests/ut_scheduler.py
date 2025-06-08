@@ -59,10 +59,27 @@ def mock_config():
 	config.set_config('schedule_interval_hours', 1.0)
 	config.set_config('enable_database_loading', True)
 	config.set_config('data_quality_report', True)
+	config.set_config('asset_id', 'TW')
+
+	api_endpoints_config = {
+		"test/endpoint": { 
+			"endpoint_specific_part": "test/endpoint", 
+			"table_name": "test_table",               
+			"params": {}                       
+		},
+		"capacity/operationally-available": { 
+			"endpoint_specific_part": "operationally-available",
+			"table_name": "capacity_operational",
+			"params": {"searchType": "CapacitySearch"} 
+		}
+	}
+	config.set_config('api_endpoints', api_endpoints_config)
+
 	config.set_config('endpoint_table_mappings', {
-		'test/endpoint': 'test_table',
-		'capacity/operationally-available': 'capacity_operational'
+		'test/endpoint': 'test_table', 
+		'operationally-available': 'capacity_operational'
 	})
+
 	config.set_config('output_dir', str(Path(tempfile.mkdtemp()) / "output"))
 	
 	# Create the output directory
@@ -111,7 +128,7 @@ def data_scheduler(mock_config, mock_web_connector, mock_db_connector):
 	scheduler._event_loop = MagicMock()
 	scheduler._thread = MagicMock()
 	scheduler._running = True
-	
+
 	yield scheduler
 	
 	# Clean up
@@ -201,8 +218,9 @@ class TestDataScheduler:
 	@pytest.mark.asyncio
 	async def test_fetch_endpoint_data(self, data_scheduler, mock_web_connector, 
 									mock_db_connector, mock_data_processor_factory):
-		"""Test _fetch_endpoint_data successfully retrieves and processes data."""
-		endpoint = "test/endpoint"
+		"""Test _fetch_endpoint_data successfully retrieves and processes data,
+		correctly using endpoint configuration."""
+		endpoint_alias = "test/endpoint" # The alias passed to DataScheduler
 		cycle = 1
 		date = datetime(2025, 6, 8)
 		
@@ -210,17 +228,32 @@ class TestDataScheduler:
 		test_file = Path("test_file.csv")
 		mock_web_connector.fetch_data_with_retry.return_value = (True, [test_file])
 		
-		# Call the method
-		success, files = await data_scheduler._fetch_endpoint_data(endpoint, cycle, date)
+		# Call the method with the endpoint alias
+		success, files = await data_scheduler._fetch_endpoint_data(endpoint_alias, cycle, date)
 		
 		# Verify results
-		assert success is True
+		assert success is True, "DataScheduler._fetch_endpoint_data should return True on success"
 		assert len(files) == 1
 		assert files[0] == test_file
 		
-		# Verify the web connector was called
-		mock_web_connector.fetch_data_with_retry.assert_called_with(
-			endpoint, cycle, date=date
+		# Define what DataScheduler should resolve from its config for the given alias
+		# Based on the mock_config fixture:
+		# config.set_config('API.endpoints', {
+		#     "test/endpoint": {
+		#         "endpoint_specific_part": "test/endpoint",
+		#         "table_name": "test_table",
+		#         "params": {}
+		#     }, ...
+		# })
+		expected_webconnector_endpoint_part = "test/endpoint" # Resolved from API.endpoints.test/endpoint.endpoint_specific_part
+		expected_webconnector_params = {}                   # Resolved from API.endpoints.test/endpoint.params
+
+		# Verify the web connector was called with the resolved specific part and params
+		mock_web_connector.fetch_data_with_retry.assert_called_once_with(
+			expected_webconnector_endpoint_part, 
+			cycle, 
+			date=date,
+			**expected_webconnector_params # Spreading an empty dict is fine
 		)
 		
 		# Verify processor factory was called

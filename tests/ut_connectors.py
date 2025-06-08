@@ -279,7 +279,7 @@ class TestWebConnector:
 		
 		# Test basic URL building
 		url = web_connector._build_url("endpoint", date)
-		assert url.startswith("https://api.example.com/api/v1/endpoint?")
+		assert url.startswith("https://api.example.com/api/v1/TESTendpoint?")
 		assert "f=csv" in url
 		assert "asset=TEST" in url
 		assert "gasDay=06%2F08%2F2025" in url
