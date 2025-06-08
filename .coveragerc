@@ -1,0 +1,56 @@
+[run]
+# Measure coverage on the src directory where all application code lives
+source = src
+
+# Exclude files from coverage measurement
+omit = 
+    */interfaces.py
+    */utils.py
+    */__init__.py
+    */__pycache__/*
+	*/reporter.py
+	*/configuration.py
+	*/main.py
+	*/processors.py
+	tests/*
+
+# Enable branch coverage to ensure both if/else branches are tested
+branch = True
+
+# Relative vs absolute path mode
+relative_files = True
+
+# Set data file to an absolute path
+data_file = ${COVERAGE_DIRECTORY}/.coverage
+
+[report]
+# Lines to exclude from coverage measurement
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise NotImplementedError
+    @abstract
+    if __name__ == .__main__.:
+    pass
+    except ImportError:
+    if TYPE_CHECKING:
+
+# Set coverage threshold
+fail_under = 70
+
+# Include missing lines in the report for clarity
+show_missing = True
+
+# Display skip/pass coverage for full transparency
+skip_covered = False
+skip_empty = False
+
+# Set precision for coverage percentage
+precision = 2
+
+[html]
+# Output directory for HTML report
+directory = ${COVERAGE_DIRECTORY}/coverage_html
+
+# Add title to the HTML report
+title = TEC TEST API Coverage Report
