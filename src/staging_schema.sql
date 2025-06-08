@@ -1,10 +1,12 @@
--- Create schema for TEC data
+-- Create schema for TEC data staging tables
+
+CREATE SCHEMA IF NOT EXISTS staging;
 
 -- Drop existing tables first to ensure clean creation
-DROP TABLE IF EXISTS operational_capacity CASCADE;
+DROP TABLE IF EXISTS staging.operational_capacity CASCADE;
 
 -- Operational Capacity Table
-CREATE TABLE IF NOT EXISTS operational_capacity (
+CREATE TABLE IF NOT EXISTS staging.operational_capacity (
     id SERIAL PRIMARY KEY,
     loc TEXT,                       -- Location ID
     loc_zn TEXT,                    -- Location zone
