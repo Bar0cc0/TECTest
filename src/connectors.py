@@ -417,13 +417,18 @@ retry attempts: {self._retry_attempts}""")
 			Sanitized filename
 		"""
 		if not filename:
-			return "unnamed_file.csv"
+			return 'unnamed_file.csv'
 			
-		# Remove any directory path components
-		clean_name = Path(filename).name
+		# Handle both Unix and Windows paths
+		if '\\' in filename:
+			# Handle Windows-style paths even on Unix
+			clean_name = filename.split('\\')[-1]
+		else:
+			# Regular path handling
+			clean_name = Path(filename).name
 		
-		# Handle path separators and other problematic characters for cross-platform compatibility
-		invalid_chars = r'[<>:"/\\|?*]'
+		# Handle remaining problematic characters
+		invalid_chars = r'[<>:"/|?*]'
 		clean_name = re.sub(invalid_chars, '_', clean_name)
 		
 		# Ensure we have a non-empty filename
@@ -533,103 +538,112 @@ retry attempts: {self._retry_attempts}""")
 			url = self._build_url(endpoint, date, cycle, **params)
 			self._logger.debug(f"Fetching data from URL: {url}")
 			
-			# Make the HTTP request to extract the original filename
-			async with session.get(url, timeout=self._timeout) as response:
-				if response.status == 200:
-					# Check content length first - skip tiny files (likely empty)
-					content_length = response.headers.get('Content-Length')
-					if content_length and int(content_length) < 200:
-						self._logger.debug(f"Skipping likely empty file ({content_length} bytes)")
-						return False, []
-					
-					#FIXME: Handle Content-Type to determine if we got a valid file
-					# Extract the original filename from Content-Disposition header
-					original_filename = None
-					content_disposition = response.headers.get('Content-Disposition')
-					if content_disposition:
-						match = re.search(r'filename="?([^"]+)"?', content_disposition)
-						if match:
-							original_filename = match.group(1)
-							self._logger.debug(f"Original filename from response: {original_filename}")
-					
-					# If no original filename found, generate one based on endpoint and date
-					if not original_filename:
-						date_str = date.strftime("%Y%m%d")
-						original_filename = f"{endpoint.replace('/', '_')}_{date_str}.{self._format}"
-						self._logger.warning(f"No original filename found, using generated name: {original_filename}")
-					
-					# Determine the actual cycle based on the original filename
-					cycle_name = None
-					if original_filename:
-						cycle_name = CycleIdentifier.get_cycle_from_filename(original_filename)
-						if cycle_name:
-							self._logger.debug(f"Identified cycle: {cycle_name} from filename: {original_filename}")
-							if cycle is not None:
-								self._logger.debug(f"Requested cycle {cycle} but file indicates {cycle_name}")
-					
-					# Only allow files with Intraday cycle names
-					if not cycle_name or not cycle_name.lower().startswith('intraday'):
-						self._logger.debug(f"Skipping non-intraday file: {original_filename}")
-						return False, []
-					
-					# Read response content to check file size and content
-					content = await response.read()
-					
-					# Skip if file is too small (likely empty or just headers)
-					if len(content) < 200:
-						self._logger.debug(f"Skipping file with content size {len(content)} bytes (likely empty)")
-						return False, []
-					
-					# Create directory structure
-					endpoint_dir = endpoint.replace('/', '_')
-					output_dir = self._output_dir / endpoint_dir
-					output_dir.mkdir(parents=True, exist_ok=True)
-					
-					# Use original filename for output, but sanitize it for filesystem safety
-					safe_original_filename = self._sanitize_filename(original_filename)
-					output_path = output_dir / safe_original_filename
-					
-					# Save the response content
-					with open(output_path, 'wb') as f:
-						f.write(content)
-					
-					# Create metadata directory
-					metadata_dir = self._output_dir / 'metadata'
-					metadata_dir.mkdir(parents=True, exist_ok=True)
-					
-					# Store metadata about this file
-					download_timestamp = datetime.now()
-					metadata = {
-						'endpoint': endpoint,
-						'requested_cycle': cycle,
-						'cycle_name': cycle_name,
-						'date': date.strftime("%Y%m%d"),
-						'original_filename': original_filename,
-						'saved_filename': safe_original_filename,
-						'download_time': download_timestamp.isoformat(),
-						'download_timestamp': time.time()
-					}
-					
-					metadata_filename = f"{output_path.stem}.meta.json"
-					metadata_path = metadata_dir / metadata_filename
-					
-					# Write metadata to file
-					with open(metadata_path, 'w') as f:
-						json.dump(metadata, f, indent=2)
-					
-					downloaded_files.append(output_path)
-					
-					# Update cache with current timestamp using the actual cycle name
-					if self._cache_enabled and cycle_name:
-						# Create a new cache key with the actual cycle name from the response
-						actual_cache_key = self._get_cache_key(endpoint, date, None, cycle_name, **params)
-						self._download_cache[actual_cache_key] = time.time()
-						self._save_cache()
-					
-					self._logger.info(f"Downloaded {len(content)} bytes to {output_path} (cycle: {cycle_name})")
-				else:
-					self._logger.error(f"Error fetching data: {response.status} {response.reason}")
-			
+			try:
+				# Make the HTTP request to extract the original filename
+				async with session.get(url, timeout=self._timeout) as response:
+					if response.status == 200:
+						# Check content length first - skip tiny files (likely empty)
+						content_length = response.headers.get('Content-Length')
+						if content_length and int(content_length) < 200:
+							self._logger.debug(f"Skipping likely empty file ({content_length} bytes)")
+							return False, []
+						
+						#FIXME: Handle Content-Type to determine if we got a valid file
+						# Extract the original filename from Content-Disposition header
+						original_filename = None
+						content_disposition = response.headers.get('Content-Disposition')
+						if content_disposition:
+							match = re.search(r'filename="?([^"]+)"?', content_disposition)
+							if match:
+								original_filename = match.group(1)
+								self._logger.debug(f"Original filename from response: {original_filename}")
+						
+						# If no original filename found, generate one based on endpoint and date
+						if not original_filename:
+							date_str = date.strftime("%Y%m%d")
+							original_filename = f"{endpoint.replace('/', '_')}_{date_str}.{self._format}"
+							self._logger.warning(f"No original filename found, using generated name: {original_filename}")
+						
+						# Determine the actual cycle based on the original filename
+						cycle_name = None
+						if original_filename:
+							cycle_name = CycleIdentifier.get_cycle_from_filename(original_filename)
+							if cycle_name:
+								self._logger.debug(f"Identified cycle: {cycle_name} from filename: {original_filename}")
+								if cycle is not None:
+									self._logger.debug(f"Requested cycle {cycle} but file indicates {cycle_name}")
+						
+						# Only allow files with Intraday cycle names
+						if not cycle_name or not cycle_name.lower().startswith('intraday'):
+							self._logger.debug(f"Skipping non-intraday file: {original_filename}")
+							return False, []
+						
+						# Read response content to check file size and content
+						content = await response.read()
+						
+						# Skip if file is too small (likely empty or just headers)
+						if len(content) < 200:
+							self._logger.debug(f"Skipping file with content size {len(content)} bytes (likely empty)")
+							return False, []
+						
+						# Create directory structure
+						endpoint_dir = endpoint.replace('/', '_')
+						output_dir = self._output_dir / endpoint_dir
+						output_dir.mkdir(parents=True, exist_ok=True)
+						
+						# Use original filename for output, but sanitize it for filesystem safety
+						safe_original_filename = self._sanitize_filename(original_filename)
+						output_path = output_dir / safe_original_filename
+						
+						# Save the response content
+						with open(output_path, 'wb') as f:
+							f.write(content)
+						
+						# Create metadata directory
+						metadata_dir = self._output_dir / 'metadata'
+						metadata_dir.mkdir(parents=True, exist_ok=True)
+						
+						# Store metadata about this file
+						download_timestamp = datetime.now()
+						metadata = {
+							'endpoint': endpoint,
+							'requested_cycle': cycle,
+							'cycle_name': cycle_name,
+							'date': date.strftime("%Y%m%d"),
+							'original_filename': original_filename,
+							'saved_filename': safe_original_filename,
+							'download_time': download_timestamp.isoformat(),
+							'download_timestamp': time.time()
+						}
+						
+						metadata_filename = f"{output_path.stem}.meta.json"
+						metadata_path = metadata_dir / metadata_filename
+						
+						# Write metadata to file
+						with open(metadata_path, 'w') as f:
+							json.dump(metadata, f, indent=2)
+						
+						downloaded_files.append(output_path)
+						
+						# Update cache with current timestamp using the actual cycle name
+						if self._cache_enabled and cycle_name:
+							# Create a new cache key with the actual cycle name from the response
+							actual_cache_key = self._get_cache_key(endpoint, date, None, cycle_name, **params)
+							self._download_cache[actual_cache_key] = time.time()
+							self._save_cache()
+						
+						self._logger.info(f"Downloaded {len(content)} bytes to {output_path} (cycle: {cycle_name})")
+					else:
+						self._logger.error(f"Error fetching data: {response.status} {response.reason}")
+						return False, [] # Return False if status is not 200
+
+			except aiohttp.ClientError as e:
+				self._logger.error(f"AIOHTTP ClientError in fetch_data for {url}: {e}")
+				return False, []
+			except Exception as e: # Catch other potential errors during the download/processing phase
+				self._logger.error(f"Unexpected error during fetch_data's download section for {url}: {e}")
+				return False, []
+
 		return len(downloaded_files) > 0, downloaded_files
 
 	def _save_metadata(self, file_path: Path, metadata: Dict[str, Any]) -> None:
@@ -1237,7 +1251,7 @@ retry_attempts: {self._retry_attempts}""")
 			
 			# Create parameterized query, excluding the id column which is SERIAL
 			placeholders = ", ".join(["%s"] * len(columns))
-			insert_query = f'INSERT INTO {table_name} ({column_str}) VALUES ({placeholders})'
+			insert_query = f'INSERT INTO staging.{table_name} ({column_str}) VALUES ({placeholders})'
 			
 			# Log the query for debugging
 			self._logger.debug(f"Insert query: {insert_query}")
@@ -1255,8 +1269,8 @@ retry_attempts: {self._retry_attempts}""")
 				batch = data[i:i+batch_size]
 				cursor.executemany(insert_query, batch)
 				row_count += len(batch)
-				self._logger.debug(f"Inserted batch of {len(batch)} rows into {table_name}")
-			
+				self._logger.debug(f"Inserted batch of {len(batch)} rows into staging.{table_name}")
+
 			return row_count
 			
 		except Exception as e:
