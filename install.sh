@@ -99,7 +99,7 @@ sudo -u postgres psql -c "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | 
 
 # Initialize database with schema
 log "Initializing database schema..."
-SCHEMA_FILE="$INSTALL_DIR/src/schema.sql"
+SCHEMA_FILE="$INSTALL_DIR/src/staging_schema.sql"
 if [ -f "$SCHEMA_FILE" ]; then
 	PGPASSWORD=$DB_PASSWORD psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f "$SCHEMA_FILE"
 	log "Database schema initialized successfully"
