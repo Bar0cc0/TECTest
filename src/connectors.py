@@ -15,6 +15,8 @@ import urllib.parse
 import threading
 import queue
 import pandas as pd
+import re
+import psycopg2
 
 from interfaces import IConfigProvider,	IConnector
 
@@ -42,6 +44,16 @@ class WebConnector(IConnector):
 		self._timeout = config.get_config('timeout')
 		self._retry_attempts = config.get_config('retry_attempts')
 
+		self._logger.debug(f"""
+WebConnector initialized with base URL: {self._base_url}, 
+routing path: {self._routing_path}, 
+format: {self._format}
+asset ID: {self._asset_id}, 
+history: {self._history},
+search type: {self._search_type}, 
+timeout: {self._timeout},
+retry attempts: {self._retry_attempts}""")
+
 		# Callback for cycle updates
 		self._cycle_callback: Optional[Callable[[int, Optional[datetime]], None]] = None
 		
@@ -58,6 +70,8 @@ class WebConnector(IConnector):
 		self._cache_dir = config.get_config('cache_dir')
 		if isinstance(self._cache_dir, str):
 			self._cache_dir = Path(self._cache_dir)
+		
+		self._logger.debug(f"Cache enabled: {self._cache_enabled}")
 			
 		# Create cache directory if it doesn't exist
 		if not self._cache_dir.exists():
@@ -117,6 +131,7 @@ class WebConnector(IConnector):
 		Returns:
 			Cache key string
 		"""
+		# Format date as YYYYMMDD
 		date_str = date.strftime("%Y%m%d")
 		
 		# If we have the actual cycle name from the response, use it
@@ -127,11 +142,11 @@ class WebConnector(IConnector):
 			cycle_str = f"_{norm_cycle_name}"
 		else:
 			# Use numeric cycle as temporary identifier
-			cycle_str = f"_cycle{cycle}" if cycle is not None else ""
+			cycle_str = f"_cycle{cycle}" if cycle is not None else ''
 		
 		# Only include non-empty parameters
 		param_items = [(k, v) for k, v in sorted(params.items()) if v]
-		param_str = "_".join(f"{k}={v}" for k, v in param_items) if param_items else ""
+		param_str = '_'.join(f"{k}={v}" for k, v in param_items) if param_items else ''
 		
 		# Create a unique key with date, cycle and params
 		return f"{endpoint}_{date_str}{cycle_str}_{param_str}"
@@ -156,7 +171,7 @@ class WebConnector(IConnector):
 					
 					# Determine cycle suffix
 					cycle_str = ""
-					if cycle_part.startswith("cycle"):
+					if cycle_part.startswith('cycle'):
 						cycle_str = f"_{cycle_part}"
 					
 					# Construct the file path
@@ -239,7 +254,7 @@ class WebConnector(IConnector):
 		Get the path to a cached file if it exists.
 		
 		Args:
-			endpoint: API endpoint
+			endpoint: Endpoint
 			cycle: Optional cycle number
 			date: Optional specific date
 			
@@ -308,10 +323,10 @@ class WebConnector(IConnector):
 	
 	def _build_url(self, endpoint: str, date: datetime, cycle: Optional[int] = None, **params) -> str:
 		"""
-		Build the complete URL for the API request.
+		Build the complete URL for the HTTP request.
 		
 		Args:
-			endpoint: API endpoint
+			endpoint: Endpoint
 			date: Date for gasDay parameter
 			cycle: Optional cycle number
 			**params: Additional parameters
@@ -404,13 +419,10 @@ class WebConnector(IConnector):
 		if not filename:
 			return "unnamed_file.csv"
 			
-		# Handle path separators and other problematic characters
-		import re
 		# Remove any directory path components
 		clean_name = Path(filename).name
 		
-		# Replace any characters that are invalid in filenames
-		# but preserve spaces - just replace truly problematic chars
+		# Handle path separators and other problematic characters for cross-platform compatibility
 		invalid_chars = r'[<>:"/\\|?*]'
 		clean_name = re.sub(invalid_chars, '_', clean_name)
 		
@@ -426,7 +438,7 @@ class WebConnector(IConnector):
 		Fetch data for the specified endpoint, cycle, and date with caching.
 		
 		Args:
-			endpoint: API endpoint
+			endpoint: Endpoint
 			cycle: Optional cycle number
 			date: Optional specific date (defaults to today)
 			**params: Additional parameters
@@ -447,17 +459,18 @@ class WebConnector(IConnector):
 			self._logger.debug(f"Skipping already processed request in this session: {initial_cache_key}")
 			return True, []
 		
+		#FIXME: Enforce separation of concerns: implement _get_cached_filenames()
 		# Check persistent cache if enabled, using metadata to find files by actual cycle name
 		if self._cache_enabled:
 			date_str = date.strftime("%Y%m%d")
 			endpoint_dir = endpoint.replace('/', '_')
 			output_dir = self._output_dir / endpoint_dir
-			metadata_dir = self._output_dir / "metadata"
+			metadata_dir = self._output_dir / 'metadata'
 			matching_files = []
 			
 			if metadata_dir.exists() and output_dir.exists():
 				# Try to find matching files based on metadata
-				for meta_file in metadata_dir.glob("*.meta.json"):
+				for meta_file in metadata_dir.glob('*.meta.json'):
 					try:
 						with open(meta_file, 'r') as f:
 							metadata = json.load(f)
@@ -529,11 +542,11 @@ class WebConnector(IConnector):
 						self._logger.debug(f"Skipping likely empty file ({content_length} bytes)")
 						return False, []
 					
+					#FIXME: Handle Content-Type to determine if we got a valid file
 					# Extract the original filename from Content-Disposition header
 					original_filename = None
 					content_disposition = response.headers.get('Content-Disposition')
 					if content_disposition:
-						import re
 						match = re.search(r'filename="?([^"]+)"?', content_disposition)
 						if match:
 							original_filename = match.group(1)
@@ -581,7 +594,7 @@ class WebConnector(IConnector):
 						f.write(content)
 					
 					# Create metadata directory
-					metadata_dir = self._output_dir / "metadata"
+					metadata_dir = self._output_dir / 'metadata'
 					metadata_dir.mkdir(parents=True, exist_ok=True)
 					
 					# Store metadata about this file
@@ -606,7 +619,7 @@ class WebConnector(IConnector):
 					
 					downloaded_files.append(output_path)
 					
-					# Update cache with current timestamp - using the actual cycle name
+					# Update cache with current timestamp using the actual cycle name
 					if self._cache_enabled and cycle_name:
 						# Create a new cache key with the actual cycle name from the response
 						actual_cache_key = self._get_cache_key(endpoint, date, None, cycle_name, **params)
@@ -637,7 +650,7 @@ class WebConnector(IConnector):
 		Fetch data with retry logic.
 		
 		Args:
-			endpoint: API endpoint
+			endpoint: Endpoint
 			cycle: Optional cycle number
 			date: Optional date
 			**params: Additional parameters
@@ -683,7 +696,7 @@ class WebConnector(IConnector):
 		Returns:
 			Always raises NotImplementedError
 		"""
-		raise NotImplementedError("WebConnector does not support post operations")
+		raise NotImplementedError('WebConnector does not support post operations')
 
 	def post_data_with_retry(self, endpoint: str, data_files: List[Path],
 						cycle: Optional[int] = None, date: Optional[datetime] = None,
@@ -707,13 +720,13 @@ class CycleIdentifier:
 	"""Extract cycle information from original HTTP response filenames."""
 	
 	# Constants for cycle types we care about
-	INTRADAY_1 = "Intraday 1"
-	INTRADAY_2 = "Intraday 2" 
-	INTRADAY_3 = "Intraday 3"
-	TIMELY = "Timely"
-	EVENING = "Evening"
-	FINAL = "Final"
-	
+	INTRADAY_1 = 'Intraday 1'
+	INTRADAY_2 = 'Intraday 2'
+	INTRADAY_3 = 'Intraday 3'
+	TIMELY = 'Timely'
+	EVENING = 'Evening'
+	FINAL = 'Final'
+
 	@staticmethod
 	def get_cycle_from_filename(filename: str) -> Optional[str]:
 		"""
@@ -729,9 +742,8 @@ class CycleIdentifier:
 		filename = Path(filename).name.lower()
 		
 		# Look for common patterns in the filename
-		if "intraday" in filename or "intra" in filename:
+		if 'intraday' in filename or 'intra' in filename:
 			# Try to extract the intraday number
-			import re
 			match = re.search(r'intraday\s*(\d)', filename, re.IGNORECASE)
 			if match:
 				intraday_num = int(match.group(1))
@@ -743,11 +755,11 @@ class CycleIdentifier:
 					return CycleIdentifier.INTRADAY_3
 		
 		# Check for other cycle types
-		if "timely" in filename:
+		if 'timely' in filename:
 			return CycleIdentifier.TIMELY
-		elif "evening" in filename:
+		elif 'evening' in filename:
 			return CycleIdentifier.EVENING
-		elif "final" in filename:
+		elif 'final' in filename:
 			return CycleIdentifier.FINAL
 				
 		return None
@@ -796,7 +808,15 @@ class DatabaseConnector(IConnector):
 		self._db_user = db_config.get('db_user', 'postgres')
 		self._db_password = db_config.get('db_password', 'postgres')
 		self._retry_attempts = config.get_config('API', {}).get('retry_attempts', 3)
-		
+
+		self._logger.debug(f"""
+DatabaseConnector initialized with db_type: {self._db_type}, 
+db_host: {self._db_host}:{self._db_port}, 
+db_name: {self._db_name},
+db_user: {self._db_user},
+db_password: {'***' if self._db_password else 'None'},
+retry_attempts: {self._retry_attempts}""")
+
 		# Initialize connection
 		self._connection = None
 		self._connect()
@@ -816,11 +836,10 @@ class DatabaseConnector(IConnector):
 		self._initialized = True
 		self._logger.info("DatabaseConnector initialized")
 	
-	def _connect(self):
+	def _connect(self) -> None:
 		"""Establish connection to the database."""
 		try:
 			if self._db_type == 'postgresql':
-				import psycopg2
 				self._logger.info(f"Connecting to PostgreSQL database {self._db_name} at {self._db_host}:{self._db_port}")
 				self._connection = psycopg2.connect(
 					host=self._db_host,
@@ -829,7 +848,7 @@ class DatabaseConnector(IConnector):
 					user=self._db_user,
 					password=self._db_password
 				)
-				# Don't enable autocommit - we want explicit transaction control
+				# Don't enable autocommit to enforce explicit transaction control
 				self._connection.autocommit = False
 				self._logger.info("Successfully connected to database")
 			else:
@@ -838,7 +857,7 @@ class DatabaseConnector(IConnector):
 			self._logger.error(f"Error connecting to database: {str(e)}")
 			self._connection = None
 	
-	def _start_worker(self):
+	def _start_worker(self) -> None:
 		"""Start the worker thread that processes the queue."""
 		if self._worker_thread is not None and self._worker_thread.is_alive():
 			return  # Worker is already running
@@ -846,16 +865,16 @@ class DatabaseConnector(IConnector):
 		self._running = True
 		self._worker_thread = threading.Thread(target=self._process_queue, daemon=True)
 		self._worker_thread.start()
-		self._logger.debug("Database worker thread started")
+		self._logger.debug('Database worker thread started')
 
-	def _stop_worker(self):
+	def _stop_worker(self) -> None:
 		"""Stop the worker thread."""
 		self._running = False
 		if self._worker_thread and self._worker_thread.is_alive():
 			self._worker_thread.join(timeout=5.0)
-			self._logger.debug("Database worker thread stopped")
+			self._logger.debug('Database worker thread stopped')
 
-	def _process_queue(self):
+	def _process_queue(self) -> None:
 		"""Worker thread function to process items in the queue."""
 		while self._running:
 			try:
@@ -899,19 +918,13 @@ class DatabaseConnector(IConnector):
 
 	async def fetch_data(self, endpoint: str, cycle: Optional[int] = None, 
 					date: Optional[datetime] = None, **params) -> Tuple[bool, List[Path]]:
-		"""
-		Not supported for DatabaseConnector.
-		"""
-		self._logger.warning("fetch_data not implemented for DatabaseConnector")
-		return False, []
+		"""Not supported for DatabaseConnector."""
+		raise NotImplementedError('fetch_data not implemented for DatabaseConnector')
 
 	async def fetch_data_with_retry(self, endpoint: str, cycle: Optional[int] = None, 
 							date: Optional[datetime] = None, **params) -> Tuple[bool, List[Path]]:
-		"""
-		Not supported for DatabaseConnector.
-		"""
-		self._logger.warning("fetch_data_with_retry not implemented for DatabaseConnector")
-		return False, []
+		"""Not supported for DatabaseConnector."""
+		raise NotImplementedError('fetch_data_with_retry not implemented for DatabaseConnector')
 	
 	def post_data(self, endpoint: str, data_files: List[Path], 
 				cycle: Optional[int] = None, date: Optional[datetime] = None, 
@@ -930,7 +943,7 @@ class DatabaseConnector(IConnector):
 			True if files were queued successfully
 		"""
 		if not data_files:
-			self._logger.warning("No files provided to post_data")
+			self._logger.warning('No files provided to post_data')
 			return False
 		
 		# Check if there are any valid files to queue
@@ -947,7 +960,7 @@ class DatabaseConnector(IConnector):
 			valid_files.append(file_path)
 		
 		if not valid_files:
-			self._logger.warning("No valid files to queue")
+			self._logger.warning('No valid files to queue')
 			return False
 			
 		# Add to the processing queue
@@ -1023,7 +1036,7 @@ class DatabaseConnector(IConnector):
 			Success flag
 		"""
 		if not self._connection:
-			self._logger.error("No database connection available")
+			self._logger.error('No database connection available')
 			self._connect()  # Try to reconnect
 			if not self._connection:
 				return False
@@ -1077,7 +1090,7 @@ class DatabaseConnector(IConnector):
 				self._logger.error(f"Error in _post_data_internal (attempt {attempt}/{self._retry_attempts}): {str(e)}")
 				
 				# Try to reconnect if connection issue
-				if "connection" in str(e).lower() or "broken" in str(e).lower():
+				if 'connection' in str(e).lower() or 'broken' in str(e).lower():
 					self._connect()
 				
 				if attempt < self._retry_attempts:
@@ -1117,7 +1130,7 @@ class DatabaseConnector(IConnector):
 			
 			if not table_exists:
 				# Get schema file path - look at project root (one level up from src)
-				schema_file_path = Path(__file__).parent.parent / 'schema.sql'
+				schema_file_path = Path(__file__).parent.parent / 'staging_schema.sql'
 				
 				self._logger.info(f"Table {table_name} does not exist. Executing schema file: {schema_file_path}")
 				
@@ -1218,11 +1231,11 @@ class DatabaseConnector(IConnector):
 			df_copy = df_copy.replace({pd.NA: None, pd.NaT: None})
 			df_copy = df_copy.where(pd.notnull(df_copy), None)
 			
-			# Get column names with proper quoting for SQL, SKIP THE ID COLUMN
+			# Get column names with proper quoting for SQL, skipping the ID column
 			columns = [col for col in df_copy.columns if col.lower() != 'id']
 			column_str = ", ".join(f'"{col}"' for col in columns)
 			
-			# Create parameterized query - excludes the id column which is SERIAL
+			# Create parameterized query, excluding the id column which is SERIAL
 			placeholders = ", ".join(["%s"] * len(columns))
 			insert_query = f'INSERT INTO {table_name} ({column_str}) VALUES ({placeholders})'
 			
@@ -1235,7 +1248,7 @@ class DatabaseConnector(IConnector):
 			data = [tuple(x) for x in df_for_insert.to_numpy()]
 			
 			# Execute in batches to avoid memory issues with large datasets
-			batch_size = 1000
+			batch_size = self._config.get_config('Optimization', {}).get('batch_size', 1000)
 			row_count = 0
 			
 			for i in range(0, len(data), batch_size):
@@ -1258,7 +1271,7 @@ class DatabaseConnector(IConnector):
 		if self._connection:
 			try:
 				self._connection.close()
-				self._logger.info("Database connection closed")
+				self._logger.info('Database connection closed')
 			except Exception as e:
 				self._logger.error(f"Error closing database connection: {str(e)}")
 			finally:

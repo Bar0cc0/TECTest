@@ -52,6 +52,8 @@ class DataScheduler:
 		# Get scheduler configuration
 		self._workers = config.get_config('workers', 4)
 
+		self._logger.debug(f"DataScheduler initialized with {self._workers} workers")
+
 	def _handle_cycle_update(self, cycle: int, date: Optional[datetime] = None) -> None:
 		"""
 		Handle cycle update notifications from the connector.
@@ -76,7 +78,7 @@ class DataScheduler:
 				self._logger.debug(f"{task_key} already scheduled, skipping")
 				continue
 				
-			# Check persistent cache first - skip if already in cache
+			# Skip if already in cache
 			if self._webconnector.is_in_cache(endpoint, cycle, date):
 				cached_path = self._webconnector.get_cached_file_path(endpoint, cycle, date)
 				self._logger.info(f"Data for {task_key} already in cache: {cached_path}, skipping download")
@@ -110,7 +112,7 @@ class DataScheduler:
 		Fetch data for a specific endpoint, cycle, and date.
 		
 		Args:
-			endpoint: API endpoint to fetch data for
+			endpoint: Endpoint to fetch data for
 			cycle: Optional cycle number
 			date: Optional specific date
 			
@@ -118,7 +120,7 @@ class DataScheduler:
 			Tuple of (success_flag, list_of_downloaded_files)
 		"""
 		try:
-			date_str = date.strftime("%Y%m%d") if date else "today"
+			date_str = date.strftime("%Y%m%d") if date else 'today'
 			self._logger.info(f"Fetching data for endpoint {endpoint} date {date_str}" + 
 						(f" cycle {cycle}" if cycle is not None else ""))
 			
@@ -217,10 +219,10 @@ class DataScheduler:
 
 	def _get_table_name_for_endpoint(self, endpoint: str) -> str:
 		"""
-		Convert API endpoint to a database table name.
+		Converts endpoint to a database table name.
 		
 		Args:
-			endpoint: API endpoint name
+			endpoint: Endpoint name
 			
 		Returns:
 			Database table name
@@ -257,7 +259,7 @@ class DataScheduler:
 		Process data quality for downloaded files.
 		
 		Args:
-			endpoint: API endpoint
+			endpoint: Endpoint
 			files: List of downloaded files
 			cycle: Optional cycle number
 			date: Optional specific date
@@ -305,7 +307,7 @@ class DataScheduler:
 		Run a scheduled task at regular intervals.
 		
 		Args:
-			endpoint: endpoint to fetch data for
+			endpoint: Endpoint to fetch data for
 			interval_hours: Hours between scheduled runs
 		"""
 		try:
@@ -331,7 +333,7 @@ class DataScheduler:
 			True if scheduled successfully
 		"""
 		if not self._running:
-			self._logger.error("Cannot schedule endpoint: scheduler is not running")
+			self._logger.error('Cannot schedule endpoint: scheduler is not running')
 			return False
 			
 		if endpoint in self._scheduled_tasks:
@@ -359,7 +361,7 @@ class DataScheduler:
 			self._scheduled_tasks[endpoint] = cast(asyncio.Future, task)
 			return True
 		else:
-			self._logger.error("Cannot schedule endpoint: event loop not available")
+			self._logger.error('Cannot schedule endpoint: event loop not available')
 			return False
 	
 	def unschedule_endpoint(self, endpoint: str) -> bool:
@@ -499,7 +501,7 @@ class DataScheduler:
 				# Close the connector
 				if hasattr(self._db_connector, 'close'):
 					self._db_connector.close()
-					self._logger.info("Database connector closed")
+					self._logger.debug('Database connector closed')
 			except Exception as e:
 				self._logger.error(f"Error closing database connector: {e}")
 
@@ -547,17 +549,24 @@ class CycleMonitor:
 		# Track downloaded data to avoid duplicates
 		self._downloaded_data = set()  # Set of (date_str, cycle) tuples
 		
+		# Track running state 
 		self._running = False
+
+		# Thread for monitoring
 		self._thread: Optional[threading.Thread] = None
-	
+
+		self._logger.debug(f"CycleMonitor initialized for endpoint '{self._endpoint}' with check interval {check_interval_minutes} minutes")
+
+	#FIXME: Reduce code duplication: this logic is similar to _check_for_new_cycles()
 	def _check_historical_data(self) -> None:
 		"""Check for historical data and ensure all cycles are downloaded."""
-		today = datetime.now().date()
 		dates = []
+		# Generate past dates based on history setting
 		for i in range(1, self._history + 1):
 			past_date = datetime.now() - timedelta(days=i)
 			dates.append(past_date)
-		
+
+		#FIXME: Enforce separation of concerns: _get_api_params() should be a separate method
 		# Get API parameters if any
 		api_params = {}
 		if self._params:
@@ -589,14 +598,14 @@ class CycleMonitor:
 					# Check if this is actually an intraday cycle we want by examining metadata
 					cached_path = self._connector.get_cached_file_path(self._endpoint, cycle, date)
 					if cached_path:
-						metadata_dir = Path(self._config.get_config('output_dir')) / "metadata"
+						metadata_dir = Path(self._config.get_config('output_dir')) / 'metadata'
 						metadata_path = metadata_dir / f"{cached_path.stem}.meta.json"
 						if metadata_path.exists():
 							try:
 								with open(metadata_path, 'r') as f:
 									metadata = json.load(f)
 									cycle_name = metadata.get('cycle_name')
-									if cycle_name and "intraday" in cycle_name.lower():
+									if cycle_name and 'intraday' in cycle_name.lower():
 										self._logger.info(f"Data for {self._endpoint} date: {date_str} {cycle_name} is already downloaded")
 										# Add to downloaded data to avoid reprocessing
 										self._downloaded_data.add(download_key)
@@ -632,15 +641,15 @@ class CycleMonitor:
 		# Rather than mapping to specific cycle numbers, we'll try all possible cycles
 		expected_intraday = []
 		if current_hour >= 15 and current_hour < 20:
-			expected_intraday.append("Intraday 1")
+			expected_intraday.append('Intraday 1')
 		elif current_hour >= 20 and current_hour < 23:
-			expected_intraday.append("Intraday 1")
-			expected_intraday.append("Intraday 2")
+			expected_intraday.append('Intraday 1')
+			expected_intraday.append('Intraday 2')
 		elif current_hour >= 23 or current_hour < 3:
-			expected_intraday.append("Intraday 1")
-			expected_intraday.append("Intraday 2")
-			expected_intraday.append("Intraday 3")
-		
+			expected_intraday.append('Intraday 1')
+			expected_intraday.append('Intraday 2')
+			expected_intraday.append('Intraday 3')
+
 		# Log which intraday cycles we expect to be available
 		if expected_intraday:
 			self._logger.info(f"Based on current time ({current_hour}:00), expecting data for: {', '.join(expected_intraday)}")
@@ -700,10 +709,10 @@ class CycleMonitor:
 	def start(self) -> bool:
 		"""Start the cycle monitor."""
 		if self._running:
-			self._logger.warning("Cycle monitor is already running")
+			self._logger.warning('Cycle monitor is already running')
 			return False
-			
-		self._logger.info("Starting cycle monitor")
+
+		self._logger.info('Starting cycle monitor')
 		self._running = True
 		
 		# Start monitoring in a separate thread
@@ -715,10 +724,10 @@ class CycleMonitor:
 	def stop(self) -> None:
 		"""Stop the cycle monitor."""
 		if not self._running:
-			self._logger.warning("Cycle monitor is not running")
+			self._logger.warning('Cycle monitor is not running')
 			return
-			
-		self._logger.info("Stopping cycle monitor")
+
+		self._logger.info('Stopping cycle monitor')
 		self._running = False
 		
 		# Wait for thread to end
