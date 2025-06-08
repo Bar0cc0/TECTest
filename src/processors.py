@@ -12,6 +12,7 @@ from datetime import datetime
 import time
 import json
 import re
+import shutil
 
 from interfaces import IConfigProvider, IDataProcessor
 
@@ -50,7 +51,6 @@ class DataProcessor(IDataProcessor):
 			backup_file = self.output_dir / f"backup_{timestamp}_{original_file.name}"
 			
 			# Copy original to backup
-			import shutil
 			shutil.copy2(original_file, backup_file)
 			
 			self.logger.debug(f"Created backup at {backup_file}")
@@ -70,8 +70,6 @@ class CapacityDataProcessor(DataProcessor):
 	def process(self, data_file: Path) -> Optional[Path]:
 		"""
 		Process capacity data file to fix quality issues.
-		
-		Modifies the original file in-place after creating a backup.
 		
 		Args:
 			data_file: Path to the file to process
@@ -101,11 +99,7 @@ class CapacityDataProcessor(DataProcessor):
 			return None
 	
 	def _fix_inconsistent_data(self, df: pd.DataFrame) -> pd.DataFrame:
-		"""
-		Converts 'unavailable' markers in the qty_reason column to 'N'.
-		- Values containing 'unavailable' in qty_reason will be replaced with 'N'
-		- Empty values in other columns are left unchanged
-		"""
+		"""Converts literals containing 'unavailable' in qty_reason to 'Unavailable'."""
 		df_fixed = df.copy()
 		unavailable_count = 0
 		
@@ -116,19 +110,18 @@ class CapacityDataProcessor(DataProcessor):
 			
 			if unavailable_mask.sum() > 0:
 				unavailable_count = unavailable_mask.sum()
-				
-				# Replace qty_reason containing 'unavailable' with 'N'
-				df_fixed.loc[unavailable_mask, 'qty_reason'] = 'N'
-				
-				self.logger.debug(f"Converted {unavailable_count} 'unavailable' values in qty_reason column to 'N'")
-		
+
+				# Replace qty_reason containing 'unavailable' with 'Unavailable'
+				df_fixed.loc[unavailable_mask, 'qty_reason'] = 'Unavailable'
+
+				self.logger.debug(f"Converted {unavailable_count} 'unavailable' values in qty_reason column to 'Unavailable'")
 		return df_fixed
 	
 	def _fix_duplicates(self, df: pd.DataFrame) -> pd.DataFrame:
 		"""Fix duplicate records in the dataframe."""
 		df_fixed = df.copy()
 		
-		# For capacity data, identify duplicate keys
+		# Create a composite key for duplicate detection
 		key_columns = []
 		if 'date' in df_fixed.columns:
 			key_columns.append('date')
@@ -144,19 +137,21 @@ class CapacityDataProcessor(DataProcessor):
 			if duplicate_count > 0:
 				self.logger.info(f"Fixing {duplicate_count} duplicate records")
 				
-				# Get columns to aggregate
+				# Get columns to aggregate assuming higher capacity
+				# represents the most recent availability status
 				agg_columns = {}
 				if 'capacity' in df_fixed.columns:
 					agg_columns['capacity'] = 'max'
 				if 'available' in df_fixed.columns:
 					agg_columns['available'] = 'max'
 				
-				# Include any other columns as 'first'
+				# For all other attributes, retain the first occurrence
+				# assuming categorical variables are consistent across duplicates
 				for col in df_fixed.columns:
 					if col not in key_columns and col not in agg_columns:
 						agg_columns[col] = 'first'
-				
-				# Aggregate duplicates
+
+				# Partition by composite key and aggregate duplicates
 				df_fixed = df_fixed.groupby(key_columns).agg(agg_columns).reset_index()
 			
 		return df_fixed
@@ -171,7 +166,7 @@ class LineageProcessor(DataProcessor):
 	
 	def process(self, data_file: Path) -> Optional[Path]:
 		"""
-		Add lineage information (cycle_id and timestamp) to CSV files.
+		Add lineage information (cycle_id, download_timestamp and measure_date) to CSV files.
 		
 		Args:
 			data_file: Path to the file to process
@@ -188,13 +183,15 @@ class LineageProcessor(DataProcessor):
 			self.logger.debug(f"Adding lineage information to: {data_file}")
 			
 			# Find associated metadata file
-			metadata_dir = Path(self.config.get_config('output_dir')) / "metadata"
+			metadata_dir = Path(self.config.get_config('output_dir')) / 'metadata'
 			metadata_path = metadata_dir / f"{data_file.stem}.meta.json"
 			
 			# Initialize with fallback values
-			cycle_name = "Unknown_Cycle"
+			cycle_name = 'Unknown_Cycle'
 			download_timestamp = time.time()  # Current timestamp as fallback
+			measure_date = datetime.now().strftime("%Y-%m-%d")  # Today as fallback
 			
+			#FIXME: Enforce separation of concerns by moving metadata handling to a separate function
 			# Try to get values from metadata if available
 			if metadata_path.exists():
 				try:
@@ -208,7 +205,6 @@ class LineageProcessor(DataProcessor):
 						# Try to extract cycle from filename
 						filename = data_file.name
 						if 'intraday' in filename.lower():
-							import re
 							match = re.search(r'intraday\s*(\d+)', filename.lower())
 							if match:
 								cycle_name = f"Intraday {match.group(1)}"
@@ -220,6 +216,39 @@ class LineageProcessor(DataProcessor):
 						# Use file modification time as fallback
 						download_timestamp = data_file.stat().st_mtime
 						self.logger.debug(f"Using file modification time as timestamp fallback for {data_file}: {download_timestamp}")
+					
+					# Extract date from metadata if available
+					if 'date' in metadata and metadata['date']:
+						try:
+							# Parse the date from metadata - could be in various formats
+							date_value = metadata['date']
+							
+							# If it's a string, try to parse it
+							if isinstance(date_value, str):
+								try:
+									# Try parsing common date formats
+									parsed_date = datetime.strptime(date_value, "%Y-%m-%d")
+								except ValueError:
+									try:
+										parsed_date = datetime.strptime(date_value, "%m/%d/%Y")
+									except ValueError:
+										try:
+											parsed_date = datetime.strptime(date_value, "%d-%m-%Y")
+										except ValueError:
+											# Default to using the timestamp
+											parsed_date = datetime.fromtimestamp(download_timestamp)
+								
+								measure_date = parsed_date.strftime("%Y-%m-%d")
+							else:
+								# If it's a timestamp, convert to date string
+								measure_date = datetime.fromtimestamp(float(date_value)).strftime("%Y-%m-%d")
+						except Exception as date_error:
+							self.logger.warning(f"Error parsing date from metadata: {date_error}, using fallback")
+							measure_date = datetime.fromtimestamp(download_timestamp).strftime("%Y-%m-%d")
+					else:
+						# Use download timestamp as fallback for date
+						measure_date = datetime.fromtimestamp(download_timestamp).strftime("%Y-%m-%d")
+						self.logger.debug(f"Using download timestamp date as fallback: {measure_date}")
 				except Exception as e:
 					self.logger.warning(f"Error reading metadata, using fallback values: {e}")
 			else:
@@ -227,11 +256,22 @@ class LineageProcessor(DataProcessor):
 				# Try to extract cycle from filename as fallback
 				filename = data_file.name
 				if 'intraday' in filename.lower():
-					import re
 					match = re.search(r'intraday\s*(\d+)', filename.lower())
 					if match:
 						cycle_name = f"Intraday {match.group(1)}"
 						self.logger.debug(f"Extracted cycle name from filename: {cycle_name}")
+				
+				# Try to extract date from filename
+				date_match = re.search(r'(\d{2})-(\d{2})-(\d{4})', filename)
+				if date_match:
+					# Format: MM-DD-YYYY in filename
+					month, day, year = date_match.groups()
+					measure_date = f"{year}-{month}-{day}"
+					self.logger.debug(f"Extracted date from filename: {measure_date}")
+				else:
+					# Use download timestamp as fallback for date
+					measure_date = datetime.fromtimestamp(download_timestamp).strftime("%Y-%m-%d")
+					self.logger.debug(f"Using download timestamp date as fallback: {measure_date}")
 			
 			# Format cycle_id by replacing spaces with underscores
 			cycle_id = cycle_name.replace(' ', '_')
@@ -240,23 +280,24 @@ class LineageProcessor(DataProcessor):
 			df = pd.read_csv(data_file)
 
 			# Check if lineage columns already exist: if they do, don't modify the file
-			if 'cycle_id' in df.columns and 'download_timestamp' in df.columns:
+			if 'cycle_id' in df.columns and 'download_timestamp' in df.columns and 'measure_date' in df.columns:
 				self.logger.debug(f"Lineage information already exists in {data_file}, skipping")
 				return data_file
 			
 			# Add lineage columns
+			df['measure_date'] = measure_date
 			df['cycle_id'] = cycle_id
 			df['download_timestamp'] = download_timestamp
 			
 			# Save back to the original file
 			df.to_csv(data_file, index=False)
 
-			self.logger.info(f"Added lineage information to {data_file}: cycle_id={cycle_id}, download_timestamp={download_timestamp}")
+			self.logger.info(f"Added lineage information to {data_file}: cycle_id={cycle_id}, download_timestamp={download_timestamp}, measure_date={measure_date}")
 			return data_file
 			
 		except Exception as e:
 			self.logger.error(f"Error adding lineage information: {e}")
-			return data_file  # Return original file even if processing fails
+			return data_file  # Return original file even if processing fails/
 
 
 class HeaderSanitizerProcessor(DataProcessor):
@@ -398,6 +439,5 @@ class DataProcessorFactory:
 				return default_processor(config)
 			else:
 				# Ultimate fallback if something is wrong with registry
-				logger.error(f"Default processor '{cls._default_processor_type}' not found in registry! "
-						f"This indicates a configuration error.")
+				logger.error(f"Default processor '{cls._default_processor_type}' not found in registry.")
 				return CapacityDataProcessor(config)
