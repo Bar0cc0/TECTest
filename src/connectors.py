@@ -31,6 +31,7 @@ class WebConnector(IConnector):
 		Args:
 			config: Configuration provider containing API settings
 		"""
+		
 		self._config = config
 		self._logger = config.get_logger()
 		
@@ -43,16 +44,19 @@ class WebConnector(IConnector):
 		self._search_type = config.get_config('search_type')
 		self._timeout = config.get_config('timeout')
 		self._retry_attempts = config.get_config('retry_attempts')
+		self._http_session_pool_size = config.get_config('http_session_pool_size')
+		self._max_concurrent_requests = config.get_config('max_concurrent_requests')
 
-		self._logger.debug(f"""
-WebConnector initialized with base URL: {self._base_url}, 
-routing path: {self._routing_path}, 
-format: {self._format}
-asset ID: {self._asset_id}, 
-history: {self._history},
-search type: {self._search_type}, 
-timeout: {self._timeout},
-retry attempts: {self._retry_attempts}""")
+		self._logger.debug(f"""WebConnector parameters: 
+				base URL: {self._base_url}, 
+				routing path: {self._routing_path}, 
+				format: {self._format},
+				asset ID: {self._asset_id}, history: {self._history},
+				search type: {self._search_type}, 
+				timeout: {self._timeout},
+				retry attempts: {self._retry_attempts},
+				HTTP session pool size: {self._http_session_pool_size},
+				Max concurrent requests: {self._max_concurrent_requests}""")
 
 		# Callback for cycle updates
 		self._cycle_callback: Optional[Callable[[int, Optional[datetime]], None]] = None
@@ -65,8 +69,8 @@ retry attempts: {self._retry_attempts}""")
 			self._output_dir.mkdir(parents=True, exist_ok=True)
 
 		# Get cache configuration
-		self._cache_enabled = config.get_config('enable_caching', True)
-		self._cache_ttl = config.get_config('cache_ttl', 86400)  # Default 1 day in seconds
+		self._cache_enabled = config.get_config('enable_caching')
+		self._cache_ttl = config.get_config('cache_ttl')
 		self._cache_dir = config.get_config('cache_dir')
 		if isinstance(self._cache_dir, str):
 			self._cache_dir = Path(self._cache_dir)
@@ -91,6 +95,8 @@ retry attempts: {self._retry_attempts}""")
 
 		# Add tracking property for cache status
 		self.last_response_from_cache = False
+
+		self._logger.info('WebConnector initialized')
 
 	def _load_cache(self) -> Dict[str, float]:
 		"""
@@ -755,7 +761,8 @@ class CycleIdentifier:
 		"""
 		# Remove path information if present
 		filename = Path(filename).name.lower()
-		
+
+		#FIXME: Lookup patterns/tags hardcoding
 		# Look for common patterns in the filename
 		if 'intraday' in filename or 'intra' in filename:
 			# Try to extract the intraday number
@@ -791,7 +798,7 @@ class CycleIdentifier:
 
 class DatabaseConnector(IConnector):
 	"""
-	Connector for database connecting to the database and processing files through a queue.
+	Connector for connecting to the database and processing files through a queue.
 	"""
 	_instance = None
 	_lock = threading.Lock()
@@ -816,21 +823,21 @@ class DatabaseConnector(IConnector):
 		
 		# Get database configuration
 		db_config = config.get_config('Database', {})
-		self._db_type = db_config.get('db_type', 'postgresql')
-		self._db_host = db_config.get('db_host', 'localhost')
-		self._db_port = db_config.get('db_port', 5432)
-		self._db_name = db_config.get('db_name', 'tec_data')
-		self._db_user = db_config.get('db_user', 'postgres')
-		self._db_password = db_config.get('db_password', 'postgres')
-		self._retry_attempts = config.get_config('API', {}).get('retry_attempts', 3)
+		self._db_type = config.get_config('db_type') or db_config.get('db_type', 'postgresql')
+		self._db_host = config.get_config('db_host') or db_config.get('db_host', 'localhost')
+		self._db_port = config.get_config('db_port') or db_config.get('db_port', 5432)
+		self._db_name = config.get_config('db_name') or db_config.get('db_name', 'tec_data')
+		self._db_user = config.get_config('db_user') or db_config.get('db_user', 'postgres')
+		self._db_password = config.get_config('db_password') or db_config.get('db_password', 'postgres')
+		self._retry_attempts = config.get_config('retry_attempts') or config.get_config('API', {}).get('retry_attempts', 3)
 
-		self._logger.debug(f"""
-DatabaseConnector initialized with db_type: {self._db_type}, 
-db_host: {self._db_host}:{self._db_port}, 
-db_name: {self._db_name},
-db_user: {self._db_user},
-db_password: {'***' if self._db_password else 'None'},
-retry_attempts: {self._retry_attempts}""")
+		self._logger.debug(f"""DatabaseConnector parameters:
+				db_type: {self._db_type}, 
+				db_host: {self._db_host}:{self._db_port}, 
+				db_name: {self._db_name},
+				db_user: {self._db_user},
+				db_password: {'***' if self._db_password else 'None'},
+				retry_attempts: {self._retry_attempts}""")
 
 		# Initialize connection
 		self._connection = None
@@ -852,10 +859,10 @@ retry_attempts: {self._retry_attempts}""")
 		self._logger.info("DatabaseConnector initialized")
 	
 	def _connect(self) -> None:
-		"""Establish connection to the database."""
+		"""Establish connection to the database. For now, only PostgreSQL is supported."""
+		#TODO: Implement factory pattern to add support for other databases
 		try:
 			if self._db_type == 'postgresql':
-				self._logger.info(f"Connecting to PostgreSQL database {self._db_name} at {self._db_host}:{self._db_port}")
 				self._connection = psycopg2.connect(
 					host=self._db_host,
 					port=self._db_port,
@@ -865,7 +872,7 @@ retry_attempts: {self._retry_attempts}""")
 				)
 				# Don't enable autocommit to enforce explicit transaction control
 				self._connection.autocommit = False
-				self._logger.info("Successfully connected to database")
+				self._logger.info(f'Successfully connected to database {self._db_name} at {self._db_host}:{self._db_port}')
 			else:
 				self._logger.error(f"Unsupported database type: {self._db_type}")
 		except Exception as e:
@@ -880,14 +887,14 @@ retry_attempts: {self._retry_attempts}""")
 		self._running = True
 		self._worker_thread = threading.Thread(target=self._process_queue, daemon=True)
 		self._worker_thread.start()
-		self._logger.debug('Database worker thread started')
+		self._logger.debug(f"Database worker thread started: {self._worker_thread.name}")
 
 	def _stop_worker(self) -> None:
 		"""Stop the worker thread."""
 		self._running = False
 		if self._worker_thread and self._worker_thread.is_alive():
 			self._worker_thread.join(timeout=5.0)
-			self._logger.debug('Database worker thread stopped')
+			self._logger.debug(f"Database worker thread stopped: {self._worker_thread.name}")
 
 	def _process_queue(self) -> None:
 		"""Worker thread function to process items in the queue."""
@@ -923,11 +930,18 @@ retry_attempts: {self._retry_attempts}""")
 				self._logger.error(f"Error in database worker thread: {str(e)}")
 
 	def register_cycle_callback(self, callback: Callable[[int, Optional[datetime]], None]) -> None:
-		"""Register a callback for cycle updates."""
+		"""Register a callback for cycle updates.
+		Args:
+			callback: Function that takes a cycle number and optional date parameter
+		"""
 		self._cycle_callback = callback
 
 	def notify_cycle_update(self, cycle: int, date: Optional[datetime] = None) -> None:
-		"""Notify that a new cycle is available."""
+		"""Notify that a new cycle is available.
+		Args:
+			cycle: The cycle number
+			date: Optional date of the cycle
+		"""
 		if self._cycle_callback:
 			self._cycle_callback(cycle, date)
 
@@ -992,7 +1006,7 @@ retry_attempts: {self._retry_attempts}""")
 		if not self._worker_thread or not self._worker_thread.is_alive():
 			self._start_worker()
 			
-		return True
+		return True # Files were queued successfully
 
 	def post_data_with_retry(self, endpoint: str, data_files: List[Path],
 						cycle: Optional[int] = None, date: Optional[datetime] = None,
@@ -1065,17 +1079,17 @@ retry_attempts: {self._retry_attempts}""")
 				# Process each file
 				total_rows = 0
 				for file_path in data_files:
-					self._logger.debug(f"Processing file: {file_path}")
+					self._logger.debug(f"Processing file: {file_path.name}")
 					
 					# Read CSV file
 					try:
 						df = pd.read_csv(file_path)
 					except Exception as e:
-						self._logger.error(f"Error reading file {file_path}: {str(e)}")
+						self._logger.error(f"Error reading file {file_path.name}: {str(e)}")
 						continue
 						
 					if df.empty:
-						self._logger.warning(f"File {file_path} is empty, skipping")
+						self._logger.warning(f"File {file_path.name} is empty, skipping")
 						continue
 					
 					# Ensure the table exists
@@ -1102,13 +1116,14 @@ retry_attempts: {self._retry_attempts}""")
 				
 			except Exception as e:
 				attempt += 1
-				self._logger.error(f"Error in _post_data_internal (attempt {attempt}/{self._retry_attempts}): {str(e)}")
+				self._logger.error(f"Error in _post_data_internal function (attempt {attempt}/{self._retry_attempts}): {str(e)}")
 				
 				# Try to reconnect if connection issue
 				if 'connection' in str(e).lower() or 'broken' in str(e).lower():
 					self._connect()
 				
 				if attempt < self._retry_attempts:
+					#TODO: Add jitter to backoff strategy
 					wait_time = 2 ** attempt  # Exponential backoff
 					self._logger.debug(f"Retrying in {wait_time} seconds...")
 					time.sleep(wait_time)
@@ -1128,15 +1143,16 @@ retry_attempts: {self._retry_attempts}""")
 		"""
 		# Check if connection is valid
 		if not self._connection:
-			self._logger.error("Cannot ensure table exists: No database connection")
+			self._logger.error(f"Cannot ensure table {table_name} exists: No database connection")
 			return False
 			
 		try:
 			# Check if table exists
+			#FIXME: Schema hardcoding
 			cursor.execute("""
 				SELECT EXISTS (
 					SELECT FROM information_schema.tables 
-					WHERE table_schema = 'public' 
+					WHERE table_schema = 'staging' 
 					AND table_name = %s
 				);
 			""", (table_name,))
@@ -1144,8 +1160,8 @@ retry_attempts: {self._retry_attempts}""")
 			table_exists = cursor.fetchone()[0]
 			
 			if not table_exists:
-				# Get schema file path - look at project root (one level up from src)
-				schema_file_path = Path(__file__).parent.parent / 'staging_schema.sql'
+				# Get schema file path
+				schema_file_path = Path(__file__).parent / 'staging_schema.sql'
 				
 				self._logger.info(f"Table {table_name} does not exist. Executing schema file: {schema_file_path}")
 				
@@ -1162,14 +1178,15 @@ retry_attempts: {self._retry_attempts}""")
 						if self._connection:
 							self._connection.commit()
 						else:
-							self._logger.error("Cannot commit schema changes: Connection lost")
+							self._logger.error('Cannot commit schema changes: Connection lost')
 							return False
 							
 						# Verify the table was created
+						#FIXME: Schema hardcoding
 						cursor.execute("""
 							SELECT EXISTS (
 								SELECT FROM information_schema.tables 
-								WHERE table_schema = 'public' 
+								WHERE table_schema = 'staging' 
 								AND table_name = %s
 							);
 						""", (table_name,))
@@ -1252,7 +1269,7 @@ retry_attempts: {self._retry_attempts}""")
 			
 			# Create parameterized query, excluding the id column which is SERIAL
 			placeholders = ", ".join(["%s"] * len(columns))
-			insert_query = f'INSERT INTO staging.{table_name} ({column_str}) VALUES ({placeholders})'
+			insert_query = f'INSERT INTO staging.{table_name} ({column_str}) VALUES ({placeholders})' #FIXME: Schema hardcoding
 			
 			# Log the query for debugging
 			self._logger.debug(f"Insert query: {insert_query}")
@@ -1270,7 +1287,7 @@ retry_attempts: {self._retry_attempts}""")
 				batch = data[i:i+batch_size]
 				cursor.executemany(insert_query, batch)
 				row_count += len(batch)
-				self._logger.debug(f"Inserted batch of {len(batch)} rows into staging.{table_name}")
+				self._logger.debug(f"Inserted batch of {len(batch)} rows into staging.{table_name}") #FIXME: Schema hardcoding
 
 			return row_count
 			
@@ -1279,7 +1296,7 @@ retry_attempts: {self._retry_attempts}""")
 			# Re-raise to be handled by caller
 			raise
 	
-	def close(self):
+	def close(self) -> None:
 		"""Close the database connection and stop the worker thread."""
 		self._stop_worker()
 		
@@ -1292,6 +1309,6 @@ retry_attempts: {self._retry_attempts}""")
 			finally:
 				self._connection = None
 
-	def __del__(self):
+	def __del__(self) -> None:
 		"""Ensure resources are cleaned up when object is garbage collected."""
 		self.close()
