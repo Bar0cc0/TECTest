@@ -1,11 +1,11 @@
 # API Configuration
 API:
-  url: "https://twtransfer.energytransfer.com"
-  routing_path: "/ipost/"
-  format: "csv"
-  asset_id: "TW/capacity/"
-  endpoint: "operationally-available"
-  search_type: "ALL"
+  url: https://twtransfer.energytransfer.com
+  routing_path: /ipost/
+  format: csv
+  asset_id: TW/capacity/
+  endpoint: operationally-available
+  search_type: ALL
   history: 3  # days
   timeout: 30 # seconds
   retry_attempts: 3
