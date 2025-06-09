@@ -101,15 +101,15 @@ class TestCycleIdentifier:
 		assert CycleIdentifier.get_cycle_from_filename("data_20250101.csv") is None
 		assert CycleIdentifier.get_cycle_from_filename("random_filename.csv") is None
 	
-	def test_is_intraday_cycle(self) -> None:
-		"""Test checking if a cycle is an intraday cycle."""
-		assert CycleIdentifier.is_intraday_cycle("Intraday 1") is True
-		assert CycleIdentifier.is_intraday_cycle("Intraday 2") is True
-		assert CycleIdentifier.is_intraday_cycle("Intraday 3") is True
-		assert CycleIdentifier.is_intraday_cycle("Timely") is False
-		assert CycleIdentifier.is_intraday_cycle("Evening") is False
-		assert CycleIdentifier.is_intraday_cycle("Final") is False
-		assert CycleIdentifier.is_intraday_cycle("Unknown") is False
+	def test_is_allowed_cycle(self) -> None:
+		"""Test checking if a cycle is an allowed cycle."""
+		assert CycleIdentifier.is_allowed_cycle("Intraday 1") is True
+		assert CycleIdentifier.is_allowed_cycle("Intraday 2") is True
+		assert CycleIdentifier.is_allowed_cycle("Intraday 3") is True
+		assert CycleIdentifier.is_allowed_cycle("Timely") is False
+		assert CycleIdentifier.is_allowed_cycle("Evening") is True
+		assert CycleIdentifier.is_allowed_cycle("Final") is False
+		assert CycleIdentifier.is_allowed_cycle("Unknown") is False
 
 
 @pytest.fixture

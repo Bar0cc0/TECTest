@@ -9,13 +9,12 @@ from datetime import datetime, timedelta
 import time
 import threading
 from typing import Dict, List, Optional, Any, Callable, Set, Tuple, Union, cast
-from concurrent.futures import Future
 from pathlib import Path
 import signal
 import json
 
 from interfaces import IConfigProvider
-from connectors import WebConnector, DatabaseConnector
+from connectors import WebConnector, DatabaseConnector, CycleIdentifier
 from reporter import DataQualityCheckerFactory
 from processors import DataProcessorFactory
 
@@ -597,7 +596,7 @@ class CycleMonitor:
 								with open(metadata_path, 'r') as f:
 									metadata = json.load(f)
 									cycle_name = metadata.get('cycle_name')
-									if cycle_name and 'intraday' in cycle_name.lower():
+									if cycle_name and CycleIdentifier.is_allowed_cycle(cycle_name):
 										self._logger.info(f"Data for {self._endpoint} date: {date_str} {cycle_name} is already downloaded")
 										# Add to downloaded data to avoid reprocessing
 										self._downloaded_data.add(download_key)
@@ -641,6 +640,7 @@ class CycleMonitor:
 			expected_intraday.append('Intraday 1')
 			expected_intraday.append('Intraday 2')
 			expected_intraday.append('Intraday 3')
+			expected_intraday.append('Evening')
 
 		# Log which intraday cycles we expect to be available
 		if expected_intraday:
@@ -666,7 +666,7 @@ class CycleMonitor:
 							with open(metadata_path, 'r') as f:
 								metadata = json.load(f)
 								cycle_name = metadata.get('cycle_name')
-								if cycle_name and "intraday" in cycle_name.lower():
+								if cycle_name and CycleIdentifier.is_allowed_cycle(cycle_name):
 									self._logger.info(f"Data for {self._endpoint} date: {today_str} {cycle_name} is already downloaded")
 									# Add to downloaded data to avoid reprocessing
 									self._downloaded_data.add(download_key)

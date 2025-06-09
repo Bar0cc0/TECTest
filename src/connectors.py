@@ -492,7 +492,7 @@ class WebConnector(IConnector):
 								
 								# Only include files with intraday cycle name
 								cycle_name = metadata.get('cycle_name')
-								if not cycle_name or not cycle_name.lower().startswith('intraday'):
+								if not cycle_name or not CycleIdentifier.is_allowed_cycle(cycle_name):
 									continue
 								
 								# If specific cycle requested, verify it matches
@@ -581,7 +581,7 @@ class WebConnector(IConnector):
 									self._logger.debug(f"Requested cycle {cycle} but file indicates {cycle_name}")
 						
 						# Only allow files with Intraday cycle names
-						if not cycle_name or not cycle_name.lower().startswith('intraday'):
+						if not cycle_name or not CycleIdentifier.is_allowed_cycle(cycle_name):
 							self._logger.debug(f"Skipping non-intraday file: {original_filename}")
 							return False, []
 						
@@ -740,7 +740,7 @@ class WebConnector(IConnector):
 class CycleIdentifier:
 	"""Extract cycle information from original HTTP response filenames."""
 	
-	# Constants for cycle types we care about
+	# Constants for cycle types
 	INTRADAY_1 = 'Intraday 1'
 	INTRADAY_2 = 'Intraday 2'
 	INTRADAY_3 = 'Intraday 3'
@@ -787,13 +787,30 @@ class CycleIdentifier:
 		return None
 	
 	@staticmethod
-	def is_intraday_cycle(cycle_name: str) -> bool:
-		"""Check if the cycle name is an intraday cycle."""
-		return cycle_name in [
-			CycleIdentifier.INTRADAY_1, 
-			CycleIdentifier.INTRADAY_2, 
-			CycleIdentifier.INTRADAY_3
-		]
+	def is_allowed_cycle(cycle_name: str, allowed_types: Optional[List[str]] = None) -> bool:
+		"""
+		Check if the cycle name is in the allowed list.
+		
+		Args:
+			cycle_name: The cycle name to check
+			allowed_types: List of allowed cycle types. If None, defaults to intraday and evening.
+			
+		Returns:
+			True if the cycle is allowed, False otherwise
+		"""
+		if not cycle_name:
+			return False
+			
+		# Default allowed types if not specified
+		if allowed_types is None:
+			allowed_types = [
+				CycleIdentifier.INTRADAY_1,
+				CycleIdentifier.INTRADAY_2, 
+				CycleIdentifier.INTRADAY_3,
+				CycleIdentifier.EVENING
+			]
+		
+		return cycle_name in allowed_types
 
 
 class DatabaseConnector(IConnector):
