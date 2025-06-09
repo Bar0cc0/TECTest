@@ -1,5 +1,4 @@
 -- Create schema for TEC data staging tables
-
 CREATE SCHEMA IF NOT EXISTS staging;
 
 -- Drop existing tables first to ensure clean creation
@@ -30,11 +29,11 @@ CREATE TABLE IF NOT EXISTS staging.operational_capacity (
 );
 
 -- Add constraints to ensure data integrity
-ALTER TABLE operational_capacity
+ALTER TABLE staging.operational_capacity
     ADD CONSTRAINT chk_op_capacity CHECK (dc >= 0 AND opc >= 0 AND tsq >= 0 AND oac >= 0);
 
 -- Create indexes for performance
-CREATE INDEX IF NOT EXISTS idx_op_capacity_download_ts ON operational_capacity (download_timestamp);
-CREATE INDEX IF NOT EXISTS idx_op_capacity_cycle ON operational_capacity (cycle_id);
-CREATE INDEX IF NOT EXISTS idx_op_capacity_loc_id ON operational_capacity (loc);
-CREATE INDEX IF NOT EXISTS idx_op_capacity_measure_date ON operational_capacity (measure_date);
+CREATE INDEX IF NOT EXISTS idx_op_capacity_download_ts ON staging.operational_capacity (download_timestamp);
+CREATE INDEX IF NOT EXISTS idx_op_capacity_cycle ON staging.operational_capacity (cycle_id);
+CREATE INDEX IF NOT EXISTS idx_op_capacity_loc_id ON staging.operational_capacity (loc);
+CREATE INDEX IF NOT EXISTS idx_op_capacity_measure_date ON staging.operational_capacity (measure_date);
