@@ -37,8 +37,8 @@ cd TecTest
 ```
 ### Create a Virtual Environment (recommended)
 ```bash
-python3 -m venv .venv 		# Or use Anaconda: 	conda create -n tecEnv python=3.10
-source .venv/bin/activate  	# 					conda activate tecEnv
+python3 -m venv .venv 		# Or use Anaconda: conda create -n tecEnv python=3.10
+source .venv/bin/activate  	#                  conda activate tecEnv
 ```
 ### Install Dependencies
 ```bash
@@ -110,7 +110,7 @@ However, in production (e.g., Docker), environment variables (`.env`) will have 
 
 2. **Reports**
    - Pytest logs are displayed in the terminal.
-   - HTML coverarge report available at `tests/coverage_html/index.html` (running local server is required to view in browser)
+   - HTML coverarge report available at `tests/coverage_html/index.html` (running a local server is required to view in browser)
 
 ![Test Coverage](./static/TestSuite.png)
 
