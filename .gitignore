@@ -5,3 +5,7 @@ coverage_html/
 *.json
 *.csv
 *.log
+
+# Only allowed in the context of the TecTest project
+# as sensitive information should never be committed
+#*.env

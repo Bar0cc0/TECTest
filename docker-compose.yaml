@@ -1,0 +1,45 @@
+# Docker Compose file for TEC Data Pipeline
+
+services:
+  tec-db:
+    image: postgres:13
+    container_name: tec_postgres_db
+    environment:
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=${DB_NAME}
+    volumes:
+      - postgres_tec_data:/var/lib/postgresql/data
+      - ./src/staging_schema.sql:/docker-entrypoint-initdb.d/init-postgres.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  tec-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tec_data_pipeline_app
+    depends_on:
+      tec-db:
+        condition: service_healthy
+    environment:
+      - DB_HOST=${DB_HOST}
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_PORT=${DB_PORT}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./cache:/app/cache
+    command: ["python", "src/main.py"]
+    restart: unless-stopped
+
+volumes:
+  postgres_tec_data:
