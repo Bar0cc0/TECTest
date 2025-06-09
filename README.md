@@ -1,25 +1,69 @@
 # TEC_TEST Data Pipeline
 
+[1. Information](#information)  
+[2. Overview](#overview)  
+[3. Installation](#installation)  
+[4. Running the Application](#running-the-application)  
+[5. Configuration](#configuration)  
+[6. Test Suite](#test-suite)  
+[7. Database Tables](#database-tables)  
+[8. Monitoring](#monitoring)
+
 ## Information
 **Energy Transfer Capacity Data Pipeline**
-- Initial URL: https://twtransfer.energytransfer.com
-- Configuration: config.yaml
-- Client Application Name: TEC Data Pipeline v1.0.0
-
+- Application Name: TEC Data Pipeline v1.0.0
+- Configuration: `config.yaml`, `.env` (for Docker)
+- Main Script: `src/main.py`
 
 ## Overview
 
-- This app is a Python-based system designed to connect to the Energy Transfer, download and process the csv files, and store data into a PostgreSQL database. 
+- This app is a Python-based system designed to download and process CSV files from Energy Transfer, and store the data into a PostgreSQL database. 
 - Once started, the system continuously checks for new data cycles and processes them as they become available. 
-- Targeted endpoint is **Operational Capacity** but the system can be easily extended to support additional data sources.
-- It is built with a focus on modularity, configurability, and performance, and it supports containerized deployment using Docker.
+- Target is TW's operational capacity but the system can easily support additional data sources (via `config.yaml`).
+- It supports containerized deployment using Docker and systemd for process management.
 
 
+## Installation
+### Prerequisites
+- Python 3.10+ 
+- PostgreSQL, PGAdmin (optional)
+- Docker, Docker Desktop (optional)
+- Anaconda (optional)
 
-## Command Line Usage
+### Clone the Repository
+```bash
+git clone https://github.com/Bar0cc0/TECTest.git
+cd TecTest
+```
+### Create a Virtual Environment (recommended)
+```bash
+python3 -m venv .venv 		# Or use Anaconda: 	conda create -n tecEnv python=3.10
+source .venv/bin/activate  	# 					conda activate tecEnv
+```
+### Install Dependencies
+```bash
+pip install -r requirements.txt
+```
 
-The application provides a flexible command-line interface for data retrieval and processing.
+## Running the Application
 
+### Method 1: Docker Deployment (recommended)
+
+#### Building and Starting Services
+```bash
+# Build all services
+docker-compose build
+
+# Start services
+docker-compose up
+
+# Stop services (and delete database data by removing volumes)
+docker-compose down -v
+
+```
+
+
+### Method 2: Direct CLI Usage (local, for development or testing)
 ### Syntax
 
 ```bash
@@ -29,10 +73,10 @@ python src/main.py [--params key=value [key=value ...]] [--loglevel LEVEL] [--te
 ### Examples
 
 ```bash
-# Fetch Operational Capacity data (default endpoint)
+# Fetch data for default asset/endpoint (defined in config.yaml)
 python src/main.py
 
-# Fetch specific cycle for Operational Capacity
+# Fetch specific cycle for default asset/endpoint
 python src/main.py --params cycle=1
 
 # Enable Debug Logging
@@ -40,90 +84,48 @@ python src/main.py --loglevel DEBUG
 
 # Run the Test Suite
 python src/main.py --test
+
+# NOTE: On WSL, you might encounter permission issues
 ```
 
-## Installation
 
-### Prerequisites
-
-- Python 3.10+
-- pip
-- PostgreSQL for database integration
-- Docker and Docker Compose (for containerized deployment)
-
-### Method 1: Local Installation
-
-1. **Clone the repository**
-   ```bash
-   git clone <repo-url>
-   cd TecTest
-   ```
-
-2. **Install dependencies**
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-   pip install -r requirements.txt
-   ```
-
-3. **Run the install script**
-   ```bash
-   chmod +x install.sh
-   ./install.sh
-   ```
-
-### Method 2: Docker Deployment
-
-1. **Build the Docker image**
-   ```bash
-   docker-compose build
-   ```
-
-2. **Run the application in containers**
-   ```bash
-   docker-compose up
-   ```
+### Method 3: Interactive mode (local, for development or testing)
+```bash
+bash install.sh
+```
+<img src="./static/CLIMenu.png" alt="interactive" width="500" />
 
 ## Configuration
 
-The system is configurable via a YAML file (`config.yaml`). 
+The system is configurable via a YAML file (`config.yaml`).  
+
+However, in production (e.g., Docker), environment variables (`.env`) will have precedence over `config.yaml` settings to ensure sensitive information is not exposed.
 
 ## Test Suite
 
 1. **Test Coverage**
    - Unit tests cover key components:
-     - Connectors
-     - Scheduler
+	 - Connectors
+	 - Scheduler
 
-2. **Test Organization**
-   - Tests separated by component
-   - Shared fixtures for consistent testing environments
-   - Independent test execution with automatic resource cleanup
+2. **Reports**
+   - Pytest logs are displayed in the terminal.
+   - HTML coverarge report available at `tests/coverage_html/index.html` (running local server is required to view in browser)
 
-3. **Coverage Reports**
-   - Generated using pytest-cov
-   - HTML reports available in tests/coverage_html/
+![Test Coverage](./static/TestSuite.png)
 
-## Docker Deployment
 
-The application is containerized for easy deployment and includes:
+## Database Tables
+Schema structure is defined in `src/staging_schema.sql`.  
 
-1. **Multi-Container Setup**
-   - Application container with the Python pipeline
-   - PostgreSQL container for data storage
-   - Volumes for persistent data
+## Monitoring
+### Docker Desktop
+Logs, container status and database management can be easily monitored using Docker Desktop: 
+![Docker Desktop](./static/DockerDesktop.png)
 
-2. **Environment Configuration**
-   - Environment variables for sensitive information
-   - Docker-specific overrides for networking (e.g., database host)
+### PGAdmin
+The database tables can be viewed using PGAdmin or any PostgreSQL client:  
+![Database Tables](./static/PGAdmin.png)
 
-3. **Deployment Commands**
-   - Build: `docker-compose build`
-   - Run: `docker-compose up`
-   - View logs: `docker-compose logs -f`
-   - Stop: `docker-compose down`
-
-4. **Resource Management**
-   - Container health checks
-   - Automatic restarts on failure
-   - Named volumes for data persistence
+### Project Assets
+![Assets](./static/Assets.png)
