@@ -338,7 +338,7 @@ class DataScheduler:
 		self._scheduled_endpoints.add(endpoint)
 		
 		# Create and schedule the task
-		interval_hours = self._config.get_config('schedule_interval_hours', 1.0) 
+		interval_hours = self._config.get_config('trigger_delay', 1.0) 
 		if not isinstance(interval_hours, float) or interval_hours <= 0:
 			interval_hours = abs(float(interval_hours))
 		self._logger.debug(f"Scheduling endpoint {endpoint} with interval {interval_hours} hours")
@@ -523,14 +523,13 @@ class DataScheduler:
 class CycleMonitor:
 	"""Monitor for detecting new data cycles and ensuring all available data is downloaded."""
 	
-	def __init__(self, config: IConfigProvider, connector: WebConnector, 
-				check_interval_minutes: float = 10.0, endpoint: Optional[str] = None,
+	def __init__(self, config: IConfigProvider, connector: WebConnector, endpoint: Optional[str] = None,
 				params: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None) -> None:
 		"""Initialize the cycle monitor."""
 		self._config = config
 		self._logger = config.get_logger()
 		self._connector = connector
-		self._check_interval = check_interval_minutes * 60  # To seconds
+		self._check_interval = self._config.get_config('trigger_delay', 10.0) * 60  # Default to 10 minutes
 		self._params = params
 		self._endpoint = endpoint or 'capacity/operationally-available'
 
@@ -546,7 +545,7 @@ class CycleMonitor:
 		# Thread for monitoring
 		self._thread: Optional[threading.Thread] = None
 
-		self._logger.debug(f"CycleMonitor initialized for endpoint '{self._endpoint}' with check interval {check_interval_minutes} minutes")
+		self._logger.debug(f"CycleMonitor initialized for endpoint '{self._endpoint}' with check interval {self._check_interval} minutes")
 
 	#FIXME: Reduce code duplication: this logic is similar to _check_for_new_cycles()
 	def _check_historical_data(self) -> None:
@@ -686,13 +685,17 @@ class CycleMonitor:
 			self._check_historical_data()
 			
 			# Then start periodic checks for today's data
+			isListeningMessageDisplayed = False	
 			while self._running:
+				# Check for new cycles every _check_interval seconds
 				self._check_for_new_cycles()
-				
 				# Sleep until next check
 				for _ in range(int(self._check_interval / 5)):
 					if self._running:
-						threading.Event().wait(5)
+						threading.Event().wait(10)
+					if not isListeningMessageDisplayed:
+						self._logger.info(f'Listening for new data with refresh rate {self._check_interval/60} minutes... (Press Ctrl+C to stop)')
+						isListeningMessageDisplayed = True
 					else:
 						break
 		except Exception as e:

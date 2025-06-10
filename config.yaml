@@ -20,6 +20,7 @@ Database:
   db_name: tec_data
   db_user: postgres
   db_password: postgres
+  db_schema: staging
 
 endpoint_table_mappings:
   operationally-available: operational_capacity
@@ -36,7 +37,7 @@ Optimization:
   cache_ttl: 86400  # Cache time-to-live in seconds (defaults to 1 day)
   workers: 4        # Number of parallel workers for data processing
   batch_size: 1000  # Number of records to process in each batch
-  trigger_delay: 1  # hours
+  trigger_delay: 10 # Minutes between data monitoring checks
 
 Reporting:
   data_quality_report: True
