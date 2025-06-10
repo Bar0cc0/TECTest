@@ -37,7 +37,7 @@ cd TecTest
 ```
 ### Create a Virtual Environment (recommended)
 ```bash
-python3 -m venv .tecEnv 	  # Or use Anaconda: conda create -n tecEnv python=3.10
+python3 -m venv .tecEnv       # Or use Anaconda: conda create -n tecEnv python=3.10
 source .tecEnv/bin/activate   #                  conda activate tecEnv
 ```
 ### Install Dependencies
