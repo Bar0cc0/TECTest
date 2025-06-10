@@ -7,17 +7,17 @@
 [5. Configuration](#configuration)  
 [6. Test Suite](#test-suite)  
 [7. Database Tables](#database-tables)  
-[8. Monitoring](#monitoring)
+[8. Observability and Monitoring](#observability-and-monitoring)
 
 ## Information
 **Energy Transfer Capacity Data Pipeline**
 - Application Name: TEC Data Pipeline v1.0.0
 - Configuration: `config.yaml`, `.env` (for Docker)
-- Main Script: `src/main.py`
+- Entry Point: `src/main.py`
 
 ## Overview
 
-- This app is a Python-based system designed to download and process CSV files from Energy Transfer, and store the data into a PostgreSQL database. 
+- This app is designed to download and process CSV files from Energy Transfer, and store the data into a PostgreSQL database. 
 - Once started, the system continuously checks for new data cycles and processes them as they become available. 
 - Target is TW's operational capacity but the system can easily support additional data sources (via `config.yaml`).
 - It supports containerized deployment using Docker and systemd for process management.
@@ -37,8 +37,8 @@ cd TecTest
 ```
 ### Create a Virtual Environment (recommended)
 ```bash
-python3 -m venv .venv 		# Or use Anaconda: conda create -n tecEnv python=3.10
-source .venv/bin/activate  	#                  conda activate tecEnv
+python3 -m venv .tecEnv 	  # Or use Anaconda: conda create -n tecEnv python=3.10
+source .tecEnv/bin/activate   #                  conda activate tecEnv
 ```
 ### Install Dependencies
 ```bash
@@ -117,14 +117,35 @@ However, in production (e.g., Docker), environment variables (`.env`) will have 
 
 ## Database Tables
 Schema structure is defined in `src/staging_schema.sql`.  
+Data loading is handled `DatabaseConnector.postdata()` through a merge operation, checking a unique key constraint to avoid duplicates.:
+```sql
+-- Parametrized SQL query for merging data into a PostgreSQL table
+INSERT INTO {schema}.{table_name} (column1, column2, ...)
+VALUES (%s, %s, ...)
+ON CONFLICT (key_columns)
+DO UPDATE SET 
+    non_key_column1 = EXCLUDED.non_key_column1,
+    non_key_column2 = EXCLUDED.non_key_column2,
+    ...
+```
+**Limitation** Current staging environment does not support SCD; however, for production, enhancements would include adding columns:
+```sql
+-- SCD Type 2 version tracking
+version_id SERIAL PRIMARY KEY,
+is_current BOOLEAN NOT NULL DEFAULT TRUE,
+valid_from TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+valid_to TIMESTAMP NOT NULL DEFAULT '9999-12-31 23:59:59',
+source_system VARCHAR(50),
+```
 
-## Monitoring
+
+## Observability and Monitoring
 ### Docker Desktop
-Logs, container status and database management can be easily monitored using Docker Desktop: 
+Containers can be easily managed using Docker Desktop: 
 ![Docker Desktop](./static/DockerDesktop.png)
 
 ### PGAdmin
-The database tables can be viewed using PGAdmin or any PostgreSQL client:  
+The database table can be managed using PGAdmin or any PostgreSQL client:  
 ![Database Tables](./static/PGAdmin.png)
 
 ### Project Assets
