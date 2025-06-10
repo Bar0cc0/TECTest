@@ -569,7 +569,7 @@ class WebConnector(IConnector):
 						if not original_filename:
 							date_str = date.strftime("%Y%m%d")
 							original_filename = f"{endpoint.replace('/', '_')}_{date_str}.{self._format}"
-							self._logger.warning(f"No original filename found: {content_disposition}")
+							self._logger.debug(f"No original filename found for {original_filename} from header: {content_disposition}")
 						
 						# Determine the actual cycle based on the original filename
 						cycle_name = None
@@ -845,6 +845,7 @@ class DatabaseConnector(IConnector):
 		self._db_port = config.get_config('db_port') or db_config.get('db_port', 5432)
 		self._db_name = config.get_config('db_name') or db_config.get('db_name', 'tec_data')
 		self._db_user = config.get_config('db_user') or db_config.get('db_user', 'postgres')
+		self._schema_name = config.get_config('db_schema') or db_config.get('db_schema', 'staging')
 		self._db_password = config.get_config('db_password') or db_config.get('db_password', 'postgres')
 		self._retry_attempts = config.get_config('retry_attempts') or config.get_config('API', {}).get('retry_attempts', 3)
 
@@ -1010,7 +1011,9 @@ class DatabaseConnector(IConnector):
 			return False
 			
 		# Add to the processing queue
-		self._logger.info(f"Queuing {len(valid_files)} files for {endpoint}")
+		self._logger.debug(f"Queuing {len(valid_files)} files for {endpoint},", 
+					 f"cycle: {cycle if cycle is not None else 'N/A'},", 
+					 f"date: {date if date is not None else 'N/A'}")
 		self._queue.put({
 			'endpoint': endpoint,
 			'files': valid_files,
@@ -1165,15 +1168,14 @@ class DatabaseConnector(IConnector):
 			
 		try:
 			# Check if table exists
-			#FIXME: Schema hardcoding
-			cursor.execute("""
+			cursor.execute(f"""
 				SELECT EXISTS (
 					SELECT FROM information_schema.tables 
-					WHERE table_schema = 'staging' 
-					AND table_name = %s
+					WHERE table_schema = '{self._schema_name}' 
+					AND table_name = '{table_name}'
 				);
-			""", (table_name,))
-			
+			""")
+
 			table_exists = cursor.fetchone()[0]
 			
 			if not table_exists:
@@ -1200,13 +1202,13 @@ class DatabaseConnector(IConnector):
 							
 						# Verify the table was created
 						#FIXME: Schema hardcoding
-						cursor.execute("""
+						cursor.execute(f"""
 							SELECT EXISTS (
 								SELECT FROM information_schema.tables 
-								WHERE table_schema = 'staging' 
-								AND table_name = %s
+								WHERE table_schema = {self._schema_name}
+								AND table_name = {table_name}
 							);
-						""", (table_name,))
+						""")
 						
 						if not cursor.fetchone()[0]:
 							self._logger.error(f"Schema file did not create the required table: {table_name}")
@@ -1228,6 +1230,116 @@ class DatabaseConnector(IConnector):
 				self._connection.rollback()
 			return False
 
+	def _ensure_constraint_exists(self, cursor, table_name: str, key_columns: List[str]) -> bool:
+		"""
+		Ensure a unique constraint exists on the key columns.
+		
+		Args:
+			cursor: Database cursor
+			table_name: Name of the table
+			key_columns: List of column names for the constraint
+			
+		Returns:
+			True if constraint exists or was successfully created, False otherwise
+		"""
+		if not self._connection:
+			self._logger.error(f'Cannot check constraint on table {self._schema_name}.{table_name}: No database connection')
+			return False
+			
+		# Filter out any empty or None values
+		valid_key_columns = [col for col in key_columns if col]
+		
+		if not valid_key_columns:
+			self._logger.error(f"No valid key columns provided for constraint on {self._schema_name}.{table_name}")
+			return False
+
+		try:
+			# Check if constraint already exists
+			constraint_name = f"{table_name}_unique_key"
+			cursor.execute("""
+				SELECT COUNT(*) 
+				FROM information_schema.table_constraints tc
+				JOIN information_schema.constraint_column_usage ccu 
+				ON tc.constraint_schema = ccu.constraint_schema 
+				AND tc.constraint_name = ccu.constraint_name
+				WHERE tc.constraint_schema = %s
+				AND tc.table_name = %s
+				AND tc.constraint_name = %s
+				AND tc.constraint_type = 'UNIQUE'
+			""", (self._schema_name, table_name, constraint_name))
+			
+			# If the constraint exists, return True
+			if cursor.fetchone()[0] > 0:
+				self._logger.debug(f"Unique constraint '{constraint_name}' already exists on {self._schema_name}.{table_name}")
+				return True
+			
+			# Else, we need to create it
+			self._logger.info(f"Unique constraint '{constraint_name}' does not exist on {self._schema_name}.{table_name}")
+			
+			# Verify all columns exist in the table
+			for col in valid_key_columns:
+				cursor.execute("""
+					SELECT COUNT(*) 
+					FROM information_schema.columns 
+					WHERE table_schema = %s 
+					AND table_name = %s 
+					AND column_name = %s
+				""", (self._schema_name, table_name, col))
+				
+				# If any column does not exist, return False
+				if cursor.fetchone()[0] == 0:
+					self._logger.error(f"Column '{col}' does not exist in table {self._schema_name}.{table_name}")
+					return False
+			
+			# Else, create the constraint
+			column_str = ", ".join(f'"{col}"' for col in valid_key_columns)
+			
+			# Check if any data in the table would violate the constraint
+			dupes_check_query = f"""
+				SELECT COUNT(*) FROM (
+					SELECT {column_str}, COUNT(*) 
+					FROM {self._schema_name}.{table_name} 
+					GROUP BY {column_str} 
+					HAVING COUNT(*) > 1
+				) AS dupes
+			"""
+			
+			cursor.execute(dupes_check_query)
+			dupes_count = cursor.fetchone()[0]
+			
+			if dupes_count > 0:
+				self._logger.warning(f"Found {dupes_count} duplicate sets in {table_name} that would violate unique constraint")
+				self._logger.warning(f"Cannot create constraint '{constraint_name}' due to existing duplicate data")
+				return False
+			
+			# No duplicates, safe to create constraint
+			alter_query = f"""
+				ALTER TABLE {self._schema_name}.{table_name} 
+				ADD CONSTRAINT {constraint_name} UNIQUE ({column_str})
+			"""
+			
+			self._logger.info(f"Creating constraint with: {alter_query}")
+			cursor.execute(alter_query)
+			
+			# Commit the changes
+			self._connection.commit()
+			
+			self._logger.info(f"Successfully created unique constraint '{constraint_name}' on {self._schema_name}.{table_name}")
+			return True
+			
+		except psycopg2.errors.DuplicateObject as e:
+			# This can happen in race conditions when multiple processes try to create the same constraint
+			self._logger.warning(f"Constraint already exists: {e}")
+			if self._connection:
+				self._connection.rollback()
+			return True
+			
+		except Exception as e:
+			self._logger.error(f"Error ensuring constraint exists: {e}")
+			if self._connection:
+				self._connection.rollback()
+			return False
+
 	def _insert_dataframe(self, cursor, table_name: str, df: pd.DataFrame) -> int:
 		"""
 		Insert DataFrame into database table.
@@ -1240,6 +1352,11 @@ class DatabaseConnector(IConnector):
 		Returns:
 			Number of rows inserted
 		"""
+		# Ensure connection is established
+		if self._connection is None:
+			self._logger.error('Database connection is not established')
+			return 0
+		
 		try:
 			# Create a copy to avoid modifying the original
 			df_copy = df.copy()
@@ -1280,37 +1397,144 @@ class DatabaseConnector(IConnector):
 			df_copy = df_copy.replace({pd.NA: None, pd.NaT: None})
 			df_copy = df_copy.where(pd.notnull(df_copy), None)
 			
-			# Get column names with proper quoting for SQL, skipping the ID column
-			columns = [col for col in df_copy.columns if col.lower() != 'id']
+			# Get column names with proper quoting for SQL
+			columns = [col for col in df_copy.columns if col.lower()]
 			column_str = ", ".join(f'"{col}"' for col in columns)
 			
-			# Create parameterized query, excluding the id column which is SERIAL
-			placeholders = ", ".join(["%s"] * len(columns))
-			insert_query = f'INSERT INTO staging.{table_name} ({column_str}) VALUES ({placeholders})' #FIXME: Schema hardcoding
+			# Get configuration for merge operation
+			key_columns = self._config.get_config(f'key_columns.{table_name}', 
+											['loc', 'loc_name', 'measure_date', 'cycle_id'])
 			
-			# Log the query for debugging
-			self._logger.debug(f"Insert query: {insert_query}")
+			# Create placeholders for the merge statement
+			placeholders = ", ".join(["%s"] * len(columns))
+			
+			# Ensure constraint exists before trying ON CONFLICT
+			constraint_exists = self._ensure_constraint_exists(cursor, table_name, key_columns)
 			
 			# Convert DataFrame to list of tuples for insertion
-			# Extract only the columns we're inserting (excluding id)
 			df_for_insert = df_copy[columns]
 			data = [tuple(x) for x in df_for_insert.to_numpy()]
 			
-			# Execute in batches to avoid memory issues with large datasets
-			batch_size = self._config.get_config('Optimization', {}).get('batch_size', 1000)
+			# Execute in batches with proper transaction handling
+			batch_size = self._config.get_config('batch_size', 1000)
 			row_count = 0
 			
+			# Process the data in batches
 			for i in range(0, len(data), batch_size):
 				batch = data[i:i+batch_size]
-				cursor.executemany(insert_query, batch)
-				row_count += len(batch)
-				self._logger.debug(f"Inserted batch of {len(batch)} rows into staging.{table_name}") #FIXME: Schema hardcoding
+				batch_successful = False
+				batch_attempts = 0
+				max_batch_attempts = 3
+				
+				while not batch_successful and batch_attempts < max_batch_attempts:
+					try:
+						batch_attempts += 1
+						
+						if constraint_exists:
+							# If constraint exists, use ON CONFLICT for merging
+							conflict_columns = ", ".join(f'"{col}"' for col in key_columns if col in columns)
+							update_columns = [col for col in columns if col not in key_columns]
+							
+							if update_columns:
+								# If we have columns to update, DO UPDATE
+								self._logger.debug(f"""Using ON CONFLICT for {self._schema_name}.{table_name} with
+									key columns: {key_columns},
+									update columns: {update_columns}""")
+								update_clause = ", ".join(f'"{col}" = EXCLUDED."{col}"' for col in update_columns)
+								query = f"""
+									INSERT INTO {self._schema_name}.{table_name} ({column_str})
+									VALUES ({placeholders})
+									ON CONFLICT ({conflict_columns})
+									DO UPDATE SET {update_clause}
+								"""
+							else:
+								# If not, DO NOTHING
+								query = f"""
+									INSERT INTO {self._schema_name}.{table_name} ({column_str})
+									VALUES ({placeholders})
+									ON CONFLICT ({conflict_columns})
+									DO NOTHING
+								"""
+						else:
+							# If constraint doesn't exist, fall back to simple INSERT
+							self._logger.warning(f"No unique constraint available for {self._schema_name}.{table_name}. Using simple INSERT (may fail on duplicates).")
+							query = f"""
+								INSERT INTO {self._schema_name}.{table_name} ({column_str})
+								VALUES ({placeholders})
+							"""
+						
+						# Log the query for debugging (truncate for readability)
+						query_start = query.replace('\n', ' ').strip()[:100] + "..."
+						self._logger.debug(f"Query: {query_start}")
+						
+						# Execute the batch
+						cursor.executemany(query, batch)
+						
+						# Commit this batch immediately
+						if self._connection:
+							self._connection.commit()
+						else:
+							raise Exception('Connection lost during batch execution')
+						
+						# If we reach here, the batch was successful
+						batch_successful = True
+						row_count += len(batch)
+						self._logger.debug(f"Successfully processed batch {i//batch_size + 1}/{(len(data)+batch_size-1)//batch_size}: "
+										f"{len(batch)} rows into {self._schema_name}.{table_name}")
+					
+					except psycopg2.errors.UniqueViolation as e:
+						# Handle duplicate key violations specially
+						if self._connection:
+							self._connection.rollback()
+						
+						self._logger.warning(f"Duplicate key violation in batch (attempt {batch_attempts}/{max_batch_attempts})")
+						
+						if batch_attempts >= max_batch_attempts:
+							self._logger.error(f"Failed to process batch due to duplicate keys: {e}")
+							raise
+						
+						# On duplicate key errors, try inserting one by one to skip duplicates
+						if batch_attempts == max_batch_attempts - 1:
+							self._logger.info("Trying row-by-row insertion to skip duplicates")
+							simple_insert = f"""
+								INSERT INTO {self._schema_name}.{table_name} ({column_str})
+								VALUES ({placeholders})
+								ON CONFLICT DO NOTHING
+							"""
+							
+							successful_rows = 0
+							for row in batch:
+								try:
+									cursor.execute(simple_insert, row)
+									if self._connection:
+										self._connection.commit()
+									successful_rows += 1
+								except Exception:
+									if self._connection:
+										self._connection.rollback()
 
+							self._logger.debug(f"Row-by-row insertion: {successful_rows}/{len(batch)} rows succeeded")
+							batch_successful = True
+							row_count += successful_rows
+						
+						time.sleep(1)  # Wait before retry
+					
+					except Exception as e:
+						# Handle other errors
+						if self._connection:
+							self._connection.rollback()
+						
+						if batch_attempts >= max_batch_attempts:
+							self._logger.error(f"Failed to process batch after {max_batch_attempts} attempts: {e}")
+							raise
+						else:
+							self._logger.warning(f"Batch processing error (attempt {batch_attempts}/{max_batch_attempts}): {e}. Retrying...")
+							time.sleep(1)
+			
 			return row_count
 			
 		except Exception as e:
 			self._logger.error(f"Error in _insert_dataframe: {str(e)}")
-			# Re-raise to be handled by caller
 			raise
 	
 	def close(self) -> None:
