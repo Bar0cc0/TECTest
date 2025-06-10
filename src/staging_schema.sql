@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS staging.operational_capacity (
 -- Add constraints to ensure data integrity
 ALTER TABLE staging.operational_capacity
     ADD CONSTRAINT chk_op_capacity CHECK (dc >= 0 AND opc >= 0 AND tsq >= 0 AND oac >= 0);
+ALTER TABLE staging.operational_capacity 
+	ADD CONSTRAINT operational_capacity_unique_key UNIQUE (loc, loc_name, measure_date, cycle_id);
 
 -- Create indexes for performance
 CREATE INDEX IF NOT EXISTS idx_op_capacity_download_ts ON staging.operational_capacity (download_timestamp);
