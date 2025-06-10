@@ -134,13 +134,11 @@ def run_tests() -> int:
 		traceback.print_exc()
 		return 1
 
-def main(#endpoint: str, 
-		 loglevel: str, **params: Any) -> int:
+def main(loglevel: str, **params: Any) -> int:
 	"""
 	Main function that orchestrates the data ingestion pipeline.
 	
 	Args:
-		endpoint: endpoint to call
 		loglevel: Logging level (DEBUG, INFO, WARNING, ERROR)
 		**params: Optional parameters to pass to the API
 	
@@ -152,7 +150,7 @@ def main(#endpoint: str,
 	display_header(__version__)
 
 	# Initialize the configuration
-	config = Configuration(loglevel=loglevel)
+	config = Configuration(loglevel_override=loglevel)
 		
 	# Get the logger
 	logger = config.get_logger()
@@ -226,13 +224,8 @@ if __name__ == "__main__":
 	if args.test:
 		sys.exit(run_tests())
 
-	# Else run normal operation
-	else:
-		# Check if an endpoint is provided
-		#if not args.endpoint:
-		#	parser.error('Parameter required: endpoint')
-		#	sys.exit(1)
-			
+	# Else run normal pipeline execution
+	else:			
 		# Convert params list to dictionary
 		params_dict = parse_params_to_dict(args.params)
 		

@@ -533,10 +533,10 @@ class DataPipeline:
 		try:
 			# Skip non-CSV files
 			if data_file.suffix.lower() != '.csv':
-				self.logger.debug(f"Skipping non-CSV file: {data_file}")
+				self.logger.debug(f"Skipping non-CSV file: {data_file.name}")
 				return data_file
 				
-			self.logger.info(f"Processing file through pipeline: {data_file}")
+			self.logger.info(f"Processing file through pipeline: {data_file.name}")
 			
 			# Read the file once
 			df = self.processors[0]._read_csv_chunked(data_file)
@@ -550,7 +550,7 @@ class DataPipeline:
 			# Write the file once
 			df.to_csv(data_file, index=False)
 			
-			self.logger.info(f"Completed pipeline processing for: {data_file}")
+			self.logger.info(f"Completed pipeline processing for: {data_file.name}")
 			return data_file
 			
 		except Exception as e:
