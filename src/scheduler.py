@@ -545,7 +545,7 @@ class CycleMonitor:
 		# Thread for monitoring
 		self._thread: Optional[threading.Thread] = None
 
-		self._logger.debug(f"CycleMonitor initialized for endpoint '{self._endpoint}' with check interval {self._check_interval} minutes")
+		self._logger.debug(f"CycleMonitor initialized for endpoint '{self._endpoint}' with check interval {self._check_interval/60} minutes")
 
 	#FIXME: Reduce code duplication: this logic is similar to _check_for_new_cycles()
 	def _check_historical_data(self) -> None:
