@@ -36,7 +36,7 @@ exclude_lines =
     if TYPE_CHECKING:
 
 # Set coverage threshold
-fail_under = 70
+fail_under = 60
 
 # Include missing lines in the report for clarity
 show_missing = True

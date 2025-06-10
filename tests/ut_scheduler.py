@@ -140,7 +140,6 @@ def cycle_monitor(mock_config, mock_web_connector):
 	monitor = CycleMonitor(
 		mock_config, 
 		mock_web_connector, 
-		check_interval_minutes=0.1,  # Short interval for testing
 		endpoint="test/endpoint"
 	)
 	
@@ -359,7 +358,7 @@ class TestDataScheduler:
 		assert endpoint not in data_scheduler._scheduled_tasks
 		assert endpoint not in data_scheduler._scheduled_endpoints
 		mock_task.cancel.assert_called_once()
-	
+
 	def test_get_table_name_for_endpoint(self, data_scheduler):
 		"""Test _get_table_name_for_endpoint method."""
 		# Test with mapping
@@ -483,6 +482,32 @@ class TestDataScheduler:
 		# 2. The logger recorded the cancellation
 		assert finished_running or mock_logger.debug.called or mock_logger.info.called
 
+	@pytest.mark.asyncio
+	async def test_process_data_quality_failure(self, data_scheduler, mock_data_quality_checker_factory):
+		"""Test _process_data_quality when quality check fails."""
+		endpoint = "test/endpoint"
+		files = [Path("test_file.csv")]
+		
+		# Setup mock file
+		with patch('pathlib.Path.stat') as mock_stat:
+			mock_stat.return_value.st_size = 1000
+			
+			# Setup quality check failure
+			checker_mock = mock_data_quality_checker_factory.create_checker.return_value
+			report_mock = MagicMock()
+			report_mock.passed = False
+			report_mock.quality_score = 0.3
+			checker_mock.check_data_quality.return_value = report_mock
+			
+			# Call the method
+			await data_scheduler._process_data_quality(endpoint, files)
+			
+			# Verify quality checker was used
+			mock_data_quality_checker_factory.create_checker.assert_called_once()
+			checker_mock.check_data_quality.assert_called_once()
+			
+			# Even with failure, report should be saved
+			checker_mock.save_report.assert_called_once()
 
 class TestCycleMonitor:
 	"""Tests for the CycleMonitor class."""
@@ -492,7 +517,6 @@ class TestCycleMonitor:
 		monitor = CycleMonitor(
 			mock_config, 
 			mock_web_connector, 
-			check_interval_minutes=10.0,
 			endpoint="test/endpoint"
 		)
 		

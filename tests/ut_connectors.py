@@ -636,7 +636,6 @@ class TestWebConnector:
 		non_existent = web_connector.get_cached_file_path(endpoint, 999, date)
 		assert non_existent is None
 
-
 	@pytest.mark.asyncio
 	async def test_fetch_data_non_intraday_cycle(self, web_connector: WebConnector) -> None:
 		"""Test fetch_data with non-intraday cycle name."""
