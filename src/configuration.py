@@ -38,21 +38,21 @@ class Configuration(IConfigProvider):
 	def __init__(self, 
 				config_path_override: Optional[str] = None, 
 				root_dir_override: Optional[str] = None, 
-				loglevel: Optional[str] = None
+				loglevel_override: Optional[str] = None
 			) -> None:
 
 		if self._initialized_fully:
-			if loglevel and hasattr(self, '_logger') and self._logger:
-				self._update_loglevel(loglevel)
+			if loglevel_override and hasattr(self, '_logger') and self._logger:
+				self._update_loglevel(loglevel_override)
 			return
 
 		# Early logger setup for use during initialization
 		self._logger = logging.getLogger(__name__)
 
-		# if logger is used before full configuration
+		# If logger is used before full configuration, capture all early messages
 		self._null_handler = logging.NullHandler()
 		self._logger.addHandler(self._null_handler)
-		self._logger.setLevel(logging.DEBUG) # Capture all early messages if needed later
+		self._logger.setLevel(logging.DEBUG) 
 
 		# Determine project root directory
 		if root_dir_override:
@@ -81,7 +81,7 @@ class Configuration(IConfigProvider):
 		self._initialize_directories()
 
 		# Finalize logging setup
-		effective_loglevel = loglevel
+		effective_loglevel = loglevel_override
 		if not effective_loglevel and 'loglevel' in self._config:
 			effective_loglevel = str(self._config['loglevel'])
 		self._initialize_logging(effective_loglevel) 
@@ -115,7 +115,7 @@ class Configuration(IConfigProvider):
 
 			# Optimization settings
 			'enable_caching': False, 'cache_ttl': 10,
-			'workers': 4, 'batch_size': 1000, 'trigger_delay': 1,
+			'workers': 4, 'batch_size': 1000, 'trigger_delay': 10,
 
 			# Reporting
 			'data_quality_report': True, 'add_data_lineage': True,
@@ -260,7 +260,7 @@ class Configuration(IConfigProvider):
 				try:
 					fallback_base = Path(tempfile.gettempdir())
 					try:
-						unique_id = str(os.getuid())
+						unique_id = str(os.getuid()) 
 					except AttributeError:
 						unique_id = uuid.uuid4().hex[:8]
 					final_log_dir = fallback_base / f"tec_app_logs_{unique_id}"
@@ -282,7 +282,7 @@ class Configuration(IConfigProvider):
 			level_to_set_str = loglevel_param.upper()
 
 		effective_loglevel_val = getattr(logging, level_to_set_str, logging.INFO)
-		if not isinstance(effective_loglevel_val, int): # Safety check if getattr failed
+		if not isinstance(effective_loglevel_val, int):
 			self._logger.warning(f"Invalid log level string '{level_to_set_str}'. Defaulting to INFO.")
 			effective_loglevel_val = logging.INFO
 
@@ -290,17 +290,26 @@ class Configuration(IConfigProvider):
 		# Configure Handlers
 		handlers_list: List[logging.Handler] = []
 		file_handler_active = False
+
+		# Define color ANSI escape sequences for formatting
+		BLUE = '\033[94m'
+		YELLOW = '\033[93m' 
+		RESET = '\033[0m'
+		
+		# Add a TimedRotatingFileHandler for file logging
 		if log_file:
 			try:
-				file_h = TimedRotatingFileHandler(log_file, when="midnight", interval=1, backupCount=7, encoding='utf-8')
+				file_h = TimedRotatingFileHandler(log_file, when='midnight', interval=1, backupCount=7, encoding='utf-8')
 				file_h.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(module)s.%(funcName)s:%(lineno)d - %(message)s'))
 				handlers_list.append(file_h)
 				file_handler_active = True
 			except Exception as e:
 				self._logger.error(f"Failed to initialize file handler for {log_file}: {e}", exc_info=True)
-		
+
+		# Add a StreamHandler for console output
 		stream_h = logging.StreamHandler()
-		stream_h.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+		formatter = logging.Formatter(f'{YELLOW}%(asctime)s{RESET} - {BLUE}%(levelname)s{RESET} - %(message)s')
+		stream_h.setFormatter(formatter)
 		handlers_list.append(stream_h)
 
 		# Configure Root Logger
